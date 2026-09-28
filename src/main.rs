@@ -120,8 +120,14 @@ async fn process_top_list(
     println!();
     for s in &summaries {
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}",
-            s.name, s.max_tpr, s.all_games_tpr, s.raw_games_tpr, s.rating, s.total_games
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            s.name,
+            s.max_tpr,
+            s.all_games_tpr,
+            s.raw_games_tpr,
+            s.rating,
+            s.diff(),
+            s.total_games
         );
     }
     println!();
@@ -143,15 +149,16 @@ async fn write_summary_csv(
     summaries: &[PlayerSummary],
 ) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(OUTPUT_DIR).await?;
-    let mut out = String::from("name,tpr_max,tpr_all,tpr_raw,rating,games\n");
+    let mut out = String::from("name,tpr_max,tpr_all,tpr_raw,rating,diff,games\n");
     for s in summaries {
         out.push_str(&format!(
-            "{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{}\n",
             csv_escape(&s.name),
             s.max_tpr,
             s.all_games_tpr,
             s.raw_games_tpr,
             csv_escape(&s.rating),
+            s.diff(),
             s.total_games
         ));
     }
@@ -174,6 +181,12 @@ struct PlayerSummary {
     all_games_tpr: i32,
     raw_games_tpr: i32,
     total_games: usize,
+}
+
+impl PlayerSummary {
+    fn diff(&self) -> i32 {
+        self.max_tpr - self.rating.parse::<i32>().unwrap_or(0)
+    }
 }
 
 struct TprWindow {
