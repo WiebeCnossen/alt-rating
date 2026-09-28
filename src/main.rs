@@ -47,8 +47,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     for player in &players {
         println!("{}\t{}\t{}", player.name, player.fide_id, player.rating);
 
-        for period in &periods {
-            let result = load_or_fetch_period(&client, &player.fide_id, period).await?;
+        let results = periods_for_player(&client, &player.fide_id, &periods).await?;
+        if results.iter().all(|r| r.games.is_empty()) {
+            return Err(format!(
+                "no rated games for {} ({}) in any of the last {} periods",
+                player.name,
+                player.fide_id,
+                periods.len()
+            )
+            .into());
+        }
+
+        for result in &results {
             for game in &result.games {
                 println!(
                     "{}\t{}\t{}\t{}\t{}\t{}",
@@ -66,6 +76,53 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+async fn periods_for_player(
+    client: &Client,
+    fide_id: &str,
+    periods: &[String],
+) -> Result<Vec<PeriodResult>, Box<dyn Error>> {
+    let cached = load_all_period_results(fide_id, periods).await;
+    let force_refresh = match &cached {
+        Some(results) => results.iter().all(|r| r.games.is_empty()),
+        None => false,
+    };
+
+    if force_refresh {
+        return fetch_all_periods(client, fide_id, periods).await;
+    }
+
+    if let Some(results) = cached {
+        return Ok(results);
+    }
+
+    let mut results = Vec::with_capacity(periods.len());
+    for period in periods {
+        results.push(load_or_fetch_period(client, fide_id, period).await?);
+    }
+    Ok(results)
+}
+
+async fn load_all_period_results(fide_id: &str, periods: &[String]) -> Option<Vec<PeriodResult>> {
+    let mut results = Vec::with_capacity(periods.len());
+    for period in periods {
+        let path = period_cache_path(fide_id, period);
+        results.push(load_period_result(&path, fide_id, period).await?);
+    }
+    Some(results)
+}
+
+async fn fetch_all_periods(
+    client: &Client,
+    fide_id: &str,
+    periods: &[String],
+) -> Result<Vec<PeriodResult>, Box<dyn Error>> {
+    let mut results = Vec::with_capacity(periods.len());
+    for period in periods {
+        results.push(fetch_and_save_period(client, fide_id, period).await?);
+    }
+    Ok(results)
+}
+
 async fn load_or_fetch_period(
     client: &Client,
     fide_id: &str,
@@ -75,15 +132,23 @@ async fn load_or_fetch_period(
     if let Some(result) = load_period_result(&path, fide_id, period).await {
         return Ok(result);
     }
+    fetch_and_save_period(client, fide_id, period).await
+}
 
-    sleep(Duration::from_millis(200)).await;
+const WAIT_MILLIS: u64 = 500;
+
+async fn fetch_and_save_period(
+    client: &Client,
+    fide_id: &str,
+    period: &str,
+) -> Result<PeriodResult, Box<dyn Error>> {
     let html = fetch_calculations(client, fide_id, period).await?;
     let result = PeriodResult {
         fide_id: fide_id.to_string(),
         period: period.to_string(),
         games: parse_games(&html)?,
     };
-    save_period_result(&path, &result).await?;
+    save_period_result(&period_cache_path(fide_id, period), &result).await?;
     Ok(result)
 }
 
@@ -165,6 +230,7 @@ async fn fetch_calculations(
     let url = CALC_URL
         .replacen("{id}", fide_id, 1)
         .replacen("{period}", period, 1);
+    sleep(Duration::from_millis(WAIT_MILLIS)).await;
     Ok(client
         .get(url)
         .send()
