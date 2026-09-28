@@ -11,7 +11,7 @@ use tokio::fs;
 use tokio::time::sleep;
 
 /// Top-lists page loads player rows via AJAX from this endpoint.
-const TOP_LIST_URL: &str = "https://ratings.fide.com/a_top.php?list=open";
+const TOP_LIST_URL: &str = "https://ratings.fide.com/a_top.php?list={list}";
 
 /// Profile calculations tab lists periods and game counts.
 const PROFILE_CALC_URL: &str = "https://ratings.fide.com/profile/{id}/calculations";
@@ -51,14 +51,29 @@ struct PeriodResult {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let players = fetch_players().await?;
     let periods = last_12_complete_months();
+
+    let men = process_top_list("open", &periods).await?;
+    write_summary_csv(summary_csv_path("open"), &men).await?;
+
+    let women = process_top_list("women", &periods).await?;
+    write_summary_csv(summary_csv_path("women"), &women).await?;
+
+    Ok(())
+}
+
+async fn process_top_list(
+    list: &str,
+    periods: &[String],
+) -> Result<Vec<PlayerSummary>, Box<dyn Error>> {
+    let players = fetch_players(list).await?;
     let mut summaries = Vec::with_capacity(players.len());
 
+    println!("LIST\t{list}");
     for player in &players {
         println!("{}\t{}\t{}", player.name, player.fide_id, player.rating);
 
-        let results = periods_for_player(&player.fide_id, &periods).await?;
+        let results = periods_for_player(&player.fide_id, periods).await?;
         if results.iter().all(|r| r.games.is_empty()) {
             return Err(format!(
                 "no rated games for {} ({}) in any of the last {} periods",
@@ -78,7 +93,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             );
         }
         println!("{}\tTPR_MAX\t{}", player.name, report.max_tpr);
-        println!("{}\tTPR_ALL\t{}\t{}", player.name, report.all_games_tpr, report.total_games);
+        println!(
+            "{}\tTPR_ALL\t{}\t{}",
+            player.name, report.all_games_tpr, report.total_games
+        );
 
         summaries.push(PlayerSummary {
             name: player.name.clone(),
@@ -103,15 +121,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             s.name, s.fide_id, s.rating, s.max_tpr, s.all_games_tpr, s.total_games
         );
     }
-    write_summary_csv(summary_csv_path(), &summaries).await?;
+    println!();
 
-    Ok(())
+    Ok(summaries)
 }
 
-fn summary_csv_path() -> PathBuf {
+fn summary_csv_path(prefix: &str) -> PathBuf {
     let today = Utc::now().date_naive();
     PathBuf::from(OUTPUT_DIR).join(format!(
-        "men-{:04}-{:02}.csv",
+        "{prefix}-{:04}-{:02}.csv",
         today.year(),
         today.month()
     ))
@@ -122,15 +140,15 @@ async fn write_summary_csv(
     summaries: &[PlayerSummary],
 ) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(OUTPUT_DIR).await?;
-    let mut out = String::from("name,fide_id,rating,tpr_max,tpr_all,games\n");
+    let mut out = String::from("name,fide_id,tpr_max,tpr_all,rating,games\n");
     for s in summaries {
         out.push_str(&format!(
             "{},{},{},{},{},{}\n",
             csv_escape(&s.name),
             csv_escape(&s.fide_id),
-            csv_escape(&s.rating),
             s.max_tpr,
             s.all_games_tpr,
+            csv_escape(&s.rating),
             s.total_games
         ));
     }
@@ -458,10 +476,11 @@ fn build_client() -> Result<Client, Box<dyn Error>> {
         .build()?)
 }
 
-async fn fetch_players() -> Result<Vec<Player>, Box<dyn Error>> {
+async fn fetch_players(list: &str) -> Result<Vec<Player>, Box<dyn Error>> {
     let client = build_client()?;
+    let url = TOP_LIST_URL.replacen("{list}", list, 1);
     let html = client
-        .get(TOP_LIST_URL)
+        .get(url)
         .send()
         .await?
         .error_for_status()?
