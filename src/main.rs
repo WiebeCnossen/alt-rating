@@ -268,21 +268,19 @@ async fn fetch_periods_using_profile(
     for period in periods {
         let path = period_cache_path(fide_id, period);
         if active.contains(period) {
-            let result = if force_refresh {
-                fetch_period(fide_id, period).await?
-            } else if let Some(cached) = load_period_result(&path, fide_id, period).await {
-                cached
+            let cached = if force_refresh {
+                None
             } else {
-                fetch_period(fide_id, period).await?
+                load_period_result(&path, fide_id, period).await
             };
 
-            if result.games.is_empty() {
-                let _ = fs::remove_file(&path).await;
-                return Err(format!(
-                    "period {period} for player {fide_id} is listed with standard games on the profile, but the calculation page has no games"
-                )
-                .into());
-            }
+            let result = match cached {
+                Some(cached) if !cached.games.is_empty() => cached,
+                _ => {
+                    let _ = fs::remove_file(&path).await;
+                    fetch_period_until_nonempty(fide_id, period).await?
+                }
+            };
 
             save_period_result(&path, &result).await?;
             results.push(result);
@@ -309,8 +307,26 @@ async fn load_all_period_results(fide_id: &str, periods: &[String]) -> Option<Ve
     Some(results)
 }
 
-async fn fetch_period(fide_id: &str, period: &str) -> Result<PeriodResult, Box<dyn Error>> {
-    let html = fetch_calculations(fide_id, period).await?;
+async fn fetch_period_until_nonempty(
+    fide_id: &str,
+    period: &str,
+) -> Result<PeriodResult, Box<dyn Error>> {
+    let mut wait_millis = WAIT_MILLIS;
+    loop {
+        let result = fetch_period(fide_id, period, wait_millis).await?;
+        if !result.games.is_empty() {
+            return Ok(result);
+        }
+        wait_millis = wait_millis.saturating_mul(2);
+    }
+}
+
+async fn fetch_period(
+    fide_id: &str,
+    period: &str,
+    wait_millis: u64,
+) -> Result<PeriodResult, Box<dyn Error>> {
+    let html = fetch_calculations(fide_id, period, wait_millis).await?;
     Ok(PeriodResult {
         fide_id: fide_id.to_string(),
         period: period.to_string(),
@@ -448,11 +464,15 @@ fn last_12_complete_months() -> Vec<String> {
         .collect()
 }
 
-async fn fetch_calculations(fide_id: &str, period: &str) -> Result<String, Box<dyn Error>> {
+async fn fetch_calculations(
+    fide_id: &str,
+    period: &str,
+    wait_millis: u64,
+) -> Result<String, Box<dyn Error>> {
     let url = CALC_URL
         .replacen("{id}", fide_id, 1)
         .replacen("{period}", period, 1);
-    sleep(Duration::from_millis(WAIT_MILLIS)).await;
+    sleep(Duration::from_millis(wait_millis)).await;
     let client = build_client()?;
     Ok(client
         .get(url)
