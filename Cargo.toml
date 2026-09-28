@@ -1,0 +1,8 @@
+[package]
+name = "alt-rating"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+regex = "1"
+reqwest = { version = "0.12", features = ["blocking"] }
