@@ -21,8 +21,11 @@ const PROFILE_CALC_URL: &str = "https://ratings.fide.com/profile/{id}/calculatio
 const CALC_URL: &str =
     "https://ratings.fide.com/a_indv_calculation.php?id_number={id}&rating_period={period}&t=0";
 
-const WAIT_MILLIS: u64 = 200;
+const WAIT_MILLIS: u64 = 500;
 const CACHE_DIR: &str = "cache";
+/// Development coefficient used when checking that |ΔR| < 0.5 at the TPR.
+const RATING_K: f64 = 10.0;
+const TPR_GAME_THRESHOLD: usize = 50;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Player {
@@ -64,22 +67,173 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .into());
         }
 
-        for result in &results {
-            for game in &result.games {
-                println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}",
-                    player.name,
-                    player.fide_id,
-                    result.period,
-                    game.color,
-                    game.opponent_rating,
-                    game.result
-                );
-            }
+        let player_rating: f64 = player.rating.parse()?;
+        let report = tpr_report(&results, player_rating)?;
+        for window in &report.windows {
+            println!(
+                "TPR\t{}\t{}\t{}\t{}",
+                window.start_period, window.end_period, window.games, window.tpr
+            );
         }
+        println!("TPR_MAX\t{}", report.max_tpr);
     }
 
     Ok(())
+}
+
+struct TprWindow {
+    start_period: String,
+    end_period: String,
+    games: usize,
+    tpr: i32,
+}
+
+struct TprReport {
+    windows: Vec<TprWindow>,
+    max_tpr: i32,
+}
+
+fn tpr_report(
+    results: &[PeriodResult],
+    player_rating: f64,
+) -> Result<TprReport, Box<dyn Error>> {
+    let period_games: Vec<(String, Vec<(f64, f64)>)> = results
+        .iter()
+        .map(|r| {
+            let games = r
+                .games
+                .iter()
+                .map(|g| {
+                    Ok((
+                        g.opponent_rating.trim().parse::<f64>()?,
+                        g.result.trim().parse::<f64>()?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+            Ok((r.period.clone(), games))
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+
+    let total_games: usize = period_games.iter().map(|(_, g)| g.len()).sum();
+    let windows = if total_games <= TPR_GAME_THRESHOLD {
+        let mut games: Vec<(f64, f64)> = period_games
+            .iter()
+            .flat_map(|(_, g)| g.iter().copied())
+            .collect();
+        let virtual_opp = player_rating - 100.0;
+        while games.len() < TPR_GAME_THRESHOLD {
+            games.push((virtual_opp, 0.5));
+        }
+        let start = period_games
+            .first()
+            .map(|(p, _)| p.clone())
+            .unwrap_or_default();
+        let end = period_games
+            .last()
+            .map(|(p, _)| p.clone())
+            .unwrap_or_default();
+        vec![TprWindow {
+            start_period: start,
+            end_period: end,
+            games: games.len(),
+            tpr: tournament_performance_rating(&games),
+        }]
+    } else {
+        minimal_consecutive_windows(&period_games)
+            .into_iter()
+            .map(|(start, end, games)| TprWindow {
+                start_period: period_games[start].0.clone(),
+                end_period: period_games[end].0.clone(),
+                games: games.len(),
+                tpr: tournament_performance_rating(&games),
+            })
+            .collect()
+    };
+
+    let max_tpr = windows
+        .iter()
+        .map(|w| w.tpr)
+        .max()
+        .ok_or("no TPR windows")?;
+    Ok(TprReport { windows, max_tpr })
+}
+
+/// Minimal index ranges [start, end] of consecutive periods with more than 50 games.
+fn minimal_consecutive_windows(
+    period_games: &[(String, Vec<(f64, f64)>)],
+) -> Vec<(usize, usize, Vec<(f64, f64)>)> {
+    let n = period_games.len();
+    let counts: Vec<usize> = period_games.iter().map(|(_, g)| g.len()).collect();
+    let mut windows = Vec::new();
+
+    for start in 0..n {
+        let mut total = 0usize;
+        for end in start..n {
+            total += counts[end];
+            if total <= TPR_GAME_THRESHOLD {
+                continue;
+            }
+            let without_start = total - counts[start];
+            let without_end = total - counts[end];
+            let shrink_start_ok = start == end || without_start <= TPR_GAME_THRESHOLD;
+            let shrink_end_ok = start == end || without_end <= TPR_GAME_THRESHOLD;
+            if shrink_start_ok && shrink_end_ok {
+                let games: Vec<(f64, f64)> = period_games[start..=end]
+                    .iter()
+                    .flat_map(|(_, g)| g.iter().copied())
+                    .collect();
+                windows.push((start, end, games));
+            }
+            // Further extension only adds games; once >50, longer windows aren't minimal.
+            break;
+        }
+    }
+
+    windows
+}
+
+/// Expected score for a player rated `player` vs opponent `opponent` (FIDE 400-cap).
+fn expected_score(player: f64, opponent: f64) -> f64 {
+    let d = (player - opponent).clamp(-400.0, 400.0);
+    1.0 / (1.0 + 10f64.powf(-d / 400.0))
+}
+
+fn score_delta(player: f64, games: &[(f64, f64)]) -> f64 {
+    games
+        .iter()
+        .map(|&(opp, score)| score - expected_score(player, opp))
+        .sum()
+}
+
+fn rating_change(player: f64, games: &[(f64, f64)], k: f64) -> f64 {
+    k * score_delta(player, games)
+}
+
+/// Rating R such that |K·(S−E(R))| is minimized and < 0.5.
+fn tournament_performance_rating(games: &[(f64, f64)]) -> i32 {
+    // score_delta increases with player rating; find crossing near 0.
+    let mut lo = 0i32;
+    let mut hi = 4500i32;
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if score_delta(mid as f64, games) > 0.0 {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    let candidates = [lo.saturating_sub(2), lo.saturating_sub(1), lo, lo + 1, lo + 2];
+    let mut best_r = lo;
+    let mut best_abs = f64::INFINITY;
+    for r in candidates {
+        let change = rating_change(r as f64, games, RATING_K).abs();
+        if change < best_abs {
+            best_abs = change;
+            best_r = r;
+        }
+    }
+    best_r
 }
 
 async fn periods_for_player(
@@ -419,5 +573,45 @@ mod tests {
             period_cache_path("1503014", "2025-09-01"),
             PathBuf::from("cache").join("1503014_2025-09-01.json")
         );
+    }
+
+    #[test]
+    fn finds_minimal_consecutive_period_windows() {
+        let periods = vec![
+            ("a".into(), vec![(2000.0, 1.0); 30]),
+            ("b".into(), vec![(2000.0, 1.0); 30]),
+            ("c".into(), vec![(2000.0, 1.0); 30]),
+        ];
+        let windows = minimal_consecutive_windows(&periods);
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].0, 0);
+        assert_eq!(windows[0].1, 1);
+        assert_eq!(windows[0].2.len(), 60);
+        assert_eq!(windows[1].0, 1);
+        assert_eq!(windows[1].1, 2);
+    }
+
+    #[test]
+    fn tpr_is_near_opponent_rating_for_even_score() {
+        let games: Vec<(f64, f64)> = (0..50).map(|_| (2500.0, 0.5)).collect();
+        let tpr = tournament_performance_rating(&games);
+        assert!((tpr - 2500).abs() <= 1);
+        assert!(rating_change(tpr as f64, &games, RATING_K).abs() < 0.5);
+    }
+
+    #[test]
+    fn tpr_pads_virtual_draws_when_under_threshold() {
+        let results = vec![PeriodResult {
+            fide_id: "1".into(),
+            period: "2025-09-01".into(),
+            games: vec![Game {
+                color: "white".into(),
+                opponent_rating: "2400".into(),
+                result: "1.00".into(),
+            }],
+        }];
+        let report = tpr_report(&results, 2500.0).unwrap();
+        assert_eq!(report.windows.len(), 1);
+        assert_eq!(report.windows[0].games, 50);
     }
 }
