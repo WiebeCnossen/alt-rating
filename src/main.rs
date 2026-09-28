@@ -99,13 +99,14 @@ async fn process_top_list(
             "{}\tTPR_ALL\t{}\t{}",
             player.name, report.all_games_tpr, report.total_games
         );
+        println!("{}\tTPR_RAW\t{}", player.name, report.raw_games_tpr);
 
         summaries.push(PlayerSummary {
             name: player.name.clone(),
-            fide_id: player.fide_id.clone(),
             rating: player.rating.clone(),
             max_tpr: report.max_tpr,
             all_games_tpr: report.all_games_tpr,
+            raw_games_tpr: report.raw_games_tpr,
             total_games: report.total_games,
         });
     }
@@ -120,7 +121,7 @@ async fn process_top_list(
     for s in &summaries {
         println!(
             "{}\t{}\t{}\t{}\t{}\t{}",
-            s.name, s.fide_id, s.rating, s.max_tpr, s.all_games_tpr, s.total_games
+            s.name, s.max_tpr, s.all_games_tpr, s.raw_games_tpr, s.rating, s.total_games
         );
     }
     println!();
@@ -142,14 +143,14 @@ async fn write_summary_csv(
     summaries: &[PlayerSummary],
 ) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(OUTPUT_DIR).await?;
-    let mut out = String::from("name,fide_id,tpr_max,tpr_all,rating,games\n");
+    let mut out = String::from("name,tpr_max,tpr_all,tpr_raw,rating,games\n");
     for s in summaries {
         out.push_str(&format!(
             "{},{},{},{},{},{}\n",
             csv_escape(&s.name),
-            csv_escape(&s.fide_id),
             s.max_tpr,
             s.all_games_tpr,
+            s.raw_games_tpr,
             csv_escape(&s.rating),
             s.total_games
         ));
@@ -168,10 +169,10 @@ fn csv_escape(field: &str) -> String {
 
 struct PlayerSummary {
     name: String,
-    fide_id: String,
     rating: String,
     max_tpr: i32,
     all_games_tpr: i32,
+    raw_games_tpr: i32,
     total_games: usize,
 }
 
@@ -186,6 +187,7 @@ struct TprReport {
     windows: Vec<TprWindow>,
     max_tpr: i32,
     all_games_tpr: i32,
+    raw_games_tpr: i32,
     total_games: usize,
 }
 
@@ -218,10 +220,13 @@ fn tpr_report(results: &[PeriodResult], player_rating: f64) -> Result<TprReport,
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
 
     let total_games: usize = period_games.iter().map(|(_, g)| g.len()).sum();
-    let mut all_games: Vec<RatedGame> = period_games
+    let actual_games: Vec<RatedGame> = period_games
         .iter()
         .flat_map(|(_, g)| g.iter().copied())
         .collect();
+    let raw_games_tpr = tournament_performance_rating(&actual_games);
+
+    let mut all_games = actual_games;
     if all_games.len() < TPR_GAME_THRESHOLD {
         let virtual_opp = player_rating - 100.0;
         while all_games.len() < TPR_GAME_THRESHOLD {
@@ -266,6 +271,7 @@ fn tpr_report(results: &[PeriodResult], player_rating: f64) -> Result<TprReport,
         windows,
         max_tpr,
         all_games_tpr,
+        raw_games_tpr,
         total_games,
     })
 }
