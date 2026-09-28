@@ -5,13 +5,15 @@ use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::error::Error;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::fs;
 use tokio::time::sleep;
+use zip::ZipArchive;
 
-/// Top-lists page loads player rows via AJAX from this endpoint.
-const TOP_LIST_URL: &str = "https://ratings.fide.com/a_top.php?list={list}";
+/// Full standard rating list (zipped fixed-width text).
+const STANDARD_RATING_LIST_URL: &str = "https://ratings.fide.com/download/standard_rating_list.zip";
 
 /// Profile calculations tab lists periods and game counts.
 const PROFILE_CALC_URL: &str = "https://ratings.fide.com/profile/{id}/calculations";
@@ -31,6 +33,15 @@ const RATING_K: f64 = 10.0;
 const TPR_GAME_THRESHOLD: usize = 50;
 /// Minimum actual games required for a player to appear in the output lists.
 const MIN_GAMES_FOR_LIST: usize = 12;
+/// Include players rated at least this many points below the group leader.
+const TOP_RATING_BAND: u32 = 250;
+
+/// Fixed-width columns in `standard_rating_list.txt`.
+const COL_ID: std::ops::Range<usize> = 0..15;
+const COL_NAME: std::ops::Range<usize> = 15..76;
+const COL_SEX: usize = 80;
+const COL_RATING: std::ops::Range<usize> = 113..119;
+const COL_FLAG_START: usize = 132;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Player {
@@ -56,25 +67,26 @@ struct PeriodResult {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let periods = last_12_complete_months();
+    let (men_players, women_players) = fetch_top_players().await?;
 
-    let men = process_top_list("open", &periods).await?;
+    let men = process_players("open", &men_players, &periods).await?;
     write_summary_csv(summary_csv_path("open"), &men).await?;
 
-    let women = process_top_list("women", &periods).await?;
+    let women = process_players("women", &women_players, &periods).await?;
     write_summary_csv(summary_csv_path("women"), &women).await?;
 
     Ok(())
 }
 
-async fn process_top_list(
+async fn process_players(
     list: &str,
+    players: &[Player],
     periods: &[String],
 ) -> Result<Vec<PlayerSummary>, Box<dyn Error>> {
-    let players = fetch_players(list).await?;
     let mut summaries = Vec::with_capacity(players.len());
 
-    println!("LIST\t{list}");
-    for player in &players {
+    println!("LIST\t{list}\t{}", players.len());
+    for player in players {
         println!("{}\t{}\t{}", player.name, player.fide_id, player.rating);
 
         let results = periods_for_player(&player.fide_id, periods).await?;
@@ -538,26 +550,107 @@ async fn try_fetch_text(url: &str) -> Result<String, Box<dyn Error>> {
         .await?)
 }
 
-async fn fetch_players(list: &str) -> Result<Vec<Player>, Box<dyn Error>> {
-    let url = TOP_LIST_URL.replacen("{list}", list, 1);
-    let html = fetch_text_with_retry(&url, |text| !parse_players(text).is_empty()).await?;
-    Ok(parse_players(&html))
+async fn try_fetch_bytes(url: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let client = build_client()?;
+    Ok(client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?
+        .to_vec())
 }
 
-fn parse_players(html: &str) -> Vec<Player> {
-    let Ok(re) = Regex::new(
-        r#"(?s)<a href=/profile/(\d+)>([^<]+)</a>.*?<td class=rating_column>(\d+)</td>"#,
-    ) else {
-        return Vec::new();
-    };
+/// Download the standard rating list and return the top active men and women.
+async fn fetch_top_players() -> Result<(Vec<Player>, Vec<Player>), Box<dyn Error>> {
+    let mut wait_millis = WAIT_MILLIS;
+    loop {
+        sleep(Duration::from_millis(wait_millis)).await;
+        match try_fetch_bytes(STANDARD_RATING_LIST_URL).await {
+            Ok(bytes) => match parse_top_players_from_zip(&bytes) {
+                Ok(players) => return Ok(players),
+                Err(_) => {
+                    if wait_millis <= WAIT_DOUBLE_LIMIT_MILLIS {
+                        wait_millis = wait_millis.saturating_mul(2);
+                    }
+                }
+            },
+            Err(_) => {
+                if wait_millis <= WAIT_DOUBLE_LIMIT_MILLIS {
+                    wait_millis = wait_millis.saturating_mul(2);
+                }
+            }
+        }
+    }
+}
 
-    re.captures_iter(html)
-        .map(|caps| Player {
-            fide_id: caps[1].to_string(),
-            name: caps[2].to_string(),
-            rating: caps[3].to_string(),
-        })
-        .collect()
+fn parse_top_players_from_zip(bytes: &[u8]) -> Result<(Vec<Player>, Vec<Player>), Box<dyn Error>> {
+    let mut archive = ZipArchive::new(Cursor::new(bytes))?;
+    let mut file = archive.by_index(0)?;
+    let mut raw = Vec::new();
+    file.read_to_end(&mut raw)?;
+    let text = String::from_utf8_lossy(&raw);
+    parse_top_players_from_rating_list(&text)
+}
+
+fn parse_top_players_from_rating_list(
+    text: &str,
+) -> Result<(Vec<Player>, Vec<Player>), Box<dyn Error>> {
+    let mut men = Vec::new();
+    let mut women = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        if idx == 0 || line.len() < COL_FLAG_START {
+            continue;
+        }
+        let flag = line[COL_FLAG_START..].trim();
+        if flag.contains('i') {
+            continue;
+        }
+        let sex = line.as_bytes().get(COL_SEX).copied().unwrap_or(b' ');
+        let rating = line[COL_RATING].trim();
+        if rating.is_empty() || rating.parse::<u32>().is_err() {
+            continue;
+        }
+        let player = Player {
+            fide_id: line[COL_ID].trim().to_string(),
+            name: line[COL_NAME].trim().to_string(),
+            rating: rating.to_string(),
+        };
+        match sex {
+            b'M' => men.push(player),
+            b'F' => women.push(player),
+            _ => {}
+        }
+    }
+
+    men.sort_by(|a, b| {
+        b.rating
+            .parse::<u32>()
+            .unwrap_or(0)
+            .cmp(&a.rating.parse::<u32>().unwrap_or(0))
+    });
+    women.sort_by(|a, b| {
+        b.rating
+            .parse::<u32>()
+            .unwrap_or(0)
+            .cmp(&a.rating.parse::<u32>().unwrap_or(0))
+    });
+    retain_within_rating_band(&mut men);
+    retain_within_rating_band(&mut women);
+
+    if men.is_empty() || women.is_empty() {
+        return Err("rating list did not yield players".into());
+    }
+    Ok((men, women))
+}
+
+fn retain_within_rating_band(players: &mut Vec<Player>) {
+    let Some(top) = players.first().and_then(|p| p.rating.parse::<u32>().ok()) else {
+        return;
+    };
+    let floor = top.saturating_sub(TOP_RATING_BAND);
+    players.retain(|p| p.rating.parse::<u32>().unwrap_or(0) >= floor);
 }
 
 /// Periods on the profile page where standard games (STD GMS) > 0.
@@ -793,5 +886,47 @@ mod tests {
         let report = tpr_report(&results, 2500.0).unwrap();
         assert_eq!(report.windows.len(), 1);
         assert_eq!(report.windows[0].games, 1);
+    }
+
+    fn rating_list_line(id: &str, name: &str, sex: char, rating: u32, flag: &str) -> String {
+        let mut line = vec![b' '; 136];
+        let put = |line: &mut [u8], start: usize, value: &str| {
+            let bytes = value.as_bytes();
+            line[start..start + bytes.len()].copy_from_slice(bytes);
+        };
+        put(&mut line, 0, id);
+        put(&mut line, 15, name);
+        line[80] = sex as u8;
+        put(&mut line, 113, &format!("{rating}"));
+        put(&mut line, 132, flag);
+        String::from_utf8(line).unwrap()
+    }
+
+    #[test]
+    fn parses_rating_list_skipping_inactive_and_taking_top_by_sex() {
+        let text = [
+            "ID Number      Name                                                         Fed Sex Tit  WTit OTit           FOA SEP26 Gms K  B-day Flag".to_string(),
+            rating_list_line("1", "Low, Man", 'M', 2000, ""),
+            rating_list_line("2", "Top, Man", 'M', 2800, ""),
+            rating_list_line("3", "Inactive, Man", 'M', 2900, "i"),
+            rating_list_line("4", "Near, Man", 'M', 2550, ""),
+            rating_list_line("5", "Top, Woman", 'F', 2500, "w"),
+            rating_list_line("6", "Inactive, Woman", 'F', 2600, "wi"),
+            rating_list_line("7", "Second, Woman", 'F', 2400, ""),
+            rating_list_line("8", "Far, Woman", 'F', 2200, ""),
+        ]
+        .join("\n");
+
+        let (men, women) = parse_top_players_from_rating_list(&text).unwrap();
+        // Men: top 2800 => floor 2550; include 2800 and 2550, not 2000.
+        assert_eq!(men.len(), 2);
+        assert_eq!(men[0].fide_id, "2");
+        assert_eq!(men[1].fide_id, "4");
+        assert!(men.iter().all(|p| p.fide_id != "3"));
+        // Women: top 2500 => floor 2250; include 2500 and 2400, not 2200.
+        assert_eq!(women.len(), 2);
+        assert_eq!(women[0].fide_id, "5");
+        assert_eq!(women[1].fide_id, "7");
+        assert!(women.iter().all(|p| p.fide_id != "6"));
     }
 }
