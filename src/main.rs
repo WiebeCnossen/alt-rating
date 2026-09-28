@@ -29,6 +29,8 @@ const OUTPUT_DIR: &str = "output";
 /// Development coefficient used when checking that |ΔR| < 0.5 at the TPR.
 const RATING_K: f64 = 10.0;
 const TPR_GAME_THRESHOLD: usize = 50;
+/// Minimum actual games required for a player to appear in the output lists.
+const MIN_GAMES_FOR_LIST: usize = 12;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Player {
@@ -100,6 +102,10 @@ async fn process_top_list(
             player.name, report.all_games_tpr, report.total_games
         );
         println!("{}\tTPR_RAW\t{}", player.name, report.raw_games_tpr);
+
+        if report.total_games < MIN_GAMES_FOR_LIST {
+            continue;
+        }
 
         summaries.push(PlayerSummary {
             name: player.name.clone(),
