@@ -92,33 +92,52 @@ async fn periods_for_player(
     };
 
     if force_refresh {
-        return fetch_periods_using_profile(fide_id, periods).await;
+        return fetch_periods_using_profile(fide_id, periods, true).await;
     }
 
     if let Some(results) = cached {
         return Ok(results);
     }
 
-    fetch_periods_using_profile(fide_id, periods).await
+    fetch_periods_using_profile(fide_id, periods, false).await
 }
 
 async fn fetch_periods_using_profile(
     fide_id: &str,
     periods: &[String],
+    force_refresh: bool,
 ) -> Result<Vec<PeriodResult>, Box<dyn Error>> {
     let active = fetch_periods_with_standard_games(fide_id).await?;
     let mut results = Vec::with_capacity(periods.len());
 
     for period in periods {
+        let path = period_cache_path(fide_id, period);
         if active.contains(period) {
-            results.push(load_or_fetch_period(fide_id, period).await?);
+            let result = if force_refresh {
+                fetch_period(fide_id, period).await?
+            } else if let Some(cached) = load_period_result(&path, fide_id, period).await {
+                cached
+            } else {
+                fetch_period(fide_id, period).await?
+            };
+
+            if result.games.is_empty() {
+                let _ = fs::remove_file(&path).await;
+                return Err(format!(
+                    "period {period} for player {fide_id} is listed with standard games on the profile, but the calculation page has no games"
+                )
+                .into());
+            }
+
+            save_period_result(&path, &result).await?;
+            results.push(result);
         } else {
             let result = PeriodResult {
                 fide_id: fide_id.to_string(),
                 period: period.clone(),
                 games: Vec::new(),
             };
-            save_period_result(&period_cache_path(fide_id, period), &result).await?;
+            save_period_result(&path, &result).await?;
             results.push(result);
         }
     }
@@ -135,29 +154,13 @@ async fn load_all_period_results(fide_id: &str, periods: &[String]) -> Option<Ve
     Some(results)
 }
 
-async fn load_or_fetch_period(
-    fide_id: &str,
-    period: &str,
-) -> Result<PeriodResult, Box<dyn Error>> {
-    let path = period_cache_path(fide_id, period);
-    if let Some(result) = load_period_result(&path, fide_id, period).await {
-        return Ok(result);
-    }
-    fetch_and_save_period(fide_id, period).await
-}
-
-async fn fetch_and_save_period(
-    fide_id: &str,
-    period: &str,
-) -> Result<PeriodResult, Box<dyn Error>> {
+async fn fetch_period(fide_id: &str, period: &str) -> Result<PeriodResult, Box<dyn Error>> {
     let html = fetch_calculations(fide_id, period).await?;
-    let result = PeriodResult {
+    Ok(PeriodResult {
         fide_id: fide_id.to_string(),
         period: period.to_string(),
         games: parse_games(&html)?,
-    };
-    save_period_result(&period_cache_path(fide_id, period), &result).await?;
-    Ok(result)
+    })
 }
 
 fn period_cache_path(fide_id: &str, period: &str) -> PathBuf {
