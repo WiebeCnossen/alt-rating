@@ -23,6 +23,7 @@ const CALC_URL: &str =
 
 const WAIT_MILLIS: u64 = 500;
 const CACHE_DIR: &str = "cache";
+const OUTPUT_DIR: &str = "output";
 /// Development coefficient used when checking that |ΔR| < 0.5 at the TPR.
 const RATING_K: f64 = 10.0;
 const TPR_GAME_THRESHOLD: usize = 50;
@@ -52,6 +53,7 @@ struct PeriodResult {
 async fn main() -> Result<(), Box<dyn Error>> {
     let players = fetch_players().await?;
     let periods = last_12_complete_months();
+    let mut summaries = Vec::with_capacity(players.len());
 
     for player in &players {
         println!("{}\t{}\t{}", player.name, player.fide_id, player.rating);
@@ -76,9 +78,81 @@ async fn main() -> Result<(), Box<dyn Error>> {
             );
         }
         println!("{}\tTPR_MAX\t{}", player.name, report.max_tpr);
+        println!("{}\tTPR_ALL\t{}\t{}", player.name, report.all_games_tpr, report.total_games);
+
+        summaries.push(PlayerSummary {
+            name: player.name.clone(),
+            fide_id: player.fide_id.clone(),
+            rating: player.rating.clone(),
+            max_tpr: report.max_tpr,
+            all_games_tpr: report.all_games_tpr,
+            total_games: report.total_games,
+        });
     }
 
+    summaries.sort_by(|a, b| {
+        b.max_tpr
+            .cmp(&a.max_tpr)
+            .then_with(|| b.all_games_tpr.cmp(&a.all_games_tpr))
+    });
+
+    println!();
+    for s in &summaries {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            s.name, s.fide_id, s.rating, s.max_tpr, s.all_games_tpr, s.total_games
+        );
+    }
+    write_summary_csv(summary_csv_path(), &summaries).await?;
+
     Ok(())
+}
+
+fn summary_csv_path() -> PathBuf {
+    let today = Utc::now().date_naive();
+    PathBuf::from(OUTPUT_DIR).join(format!(
+        "men-{:04}-{:02}.csv",
+        today.year(),
+        today.month()
+    ))
+}
+
+async fn write_summary_csv(
+    path: impl AsRef<Path>,
+    summaries: &[PlayerSummary],
+) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(OUTPUT_DIR).await?;
+    let mut out = String::from("name,fide_id,rating,tpr_max,tpr_all,games\n");
+    for s in summaries {
+        out.push_str(&format!(
+            "{},{},{},{},{},{}\n",
+            csv_escape(&s.name),
+            csv_escape(&s.fide_id),
+            csv_escape(&s.rating),
+            s.max_tpr,
+            s.all_games_tpr,
+            s.total_games
+        ));
+    }
+    fs::write(path, out).await?;
+    Ok(())
+}
+
+fn csv_escape(field: &str) -> String {
+    if field.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field.to_string()
+    }
+}
+
+struct PlayerSummary {
+    name: String,
+    fide_id: String,
+    rating: String,
+    max_tpr: i32,
+    all_games_tpr: i32,
+    total_games: usize,
 }
 
 struct TprWindow {
@@ -91,6 +165,8 @@ struct TprWindow {
 struct TprReport {
     windows: Vec<TprWindow>,
     max_tpr: i32,
+    all_games_tpr: i32,
+    total_games: usize,
 }
 
 fn tpr_report(
@@ -115,15 +191,19 @@ fn tpr_report(
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
 
     let total_games: usize = period_games.iter().map(|(_, g)| g.len()).sum();
-    let windows = if total_games < TPR_GAME_THRESHOLD {
-        let mut games: Vec<(f64, f64)> = period_games
-            .iter()
-            .flat_map(|(_, g)| g.iter().copied())
-            .collect();
+    let mut all_games: Vec<(f64, f64)> = period_games
+        .iter()
+        .flat_map(|(_, g)| g.iter().copied())
+        .collect();
+    if all_games.len() < TPR_GAME_THRESHOLD {
         let virtual_opp = player_rating - 100.0;
-        while games.len() < TPR_GAME_THRESHOLD {
-            games.push((virtual_opp, 0.5));
+        while all_games.len() < TPR_GAME_THRESHOLD {
+            all_games.push((virtual_opp, 0.5));
         }
+    }
+    let all_games_tpr = tournament_performance_rating(&all_games);
+
+    let windows = if total_games < TPR_GAME_THRESHOLD {
         let start = period_games
             .first()
             .map(|(p, _)| p.clone())
@@ -135,8 +215,8 @@ fn tpr_report(
         vec![TprWindow {
             start_period: start,
             end_period: end,
-            games: games.len(),
-            tpr: tournament_performance_rating(&games),
+            games: total_games,
+            tpr: all_games_tpr,
         }]
     } else {
         consecutive_windows_with_at_least(&period_games, TPR_GAME_THRESHOLD)
@@ -155,7 +235,12 @@ fn tpr_report(
         .map(|w| w.tpr)
         .max()
         .ok_or("no TPR windows")?;
-    Ok(TprReport { windows, max_tpr })
+    Ok(TprReport {
+        windows,
+        max_tpr,
+        all_games_tpr,
+        total_games,
+    })
 }
 
 /// All consecutive period ranges [start, end] with at least `min_games` games,
@@ -316,7 +401,9 @@ async fn fetch_period_until_nonempty(
         if !result.games.is_empty() {
             return Ok(result);
         }
-        wait_millis = wait_millis.saturating_mul(2);
+        if wait_millis <= 5_000 {
+            wait_millis = wait_millis.saturating_mul(2);
+        }
     }
 }
 
@@ -642,6 +729,6 @@ mod tests {
         }];
         let report = tpr_report(&results, 2500.0).unwrap();
         assert_eq!(report.windows.len(), 1);
-        assert_eq!(report.windows[0].games, 50);
+        assert_eq!(report.windows[0].games, 1);
     }
 }
