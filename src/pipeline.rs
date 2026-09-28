@@ -35,6 +35,7 @@ pub async fn process_players(
     periods: &[String],
 ) -> Result<Vec<PlayerSummary>, Box<dyn Error>> {
     let mut summaries = Vec::new();
+    let mut anchor_tpr: Option<i32> = None;
 
     println!("LIST\t{list}\t{}", players.len());
     for player in players {
@@ -88,6 +89,7 @@ pub async fn process_players(
         ));
         sort_summaries_by_tpr(&mut summaries);
         retain_within_tpr_band(&mut summaries);
+        maybe_print_new_anchor(list, &summaries, &mut anchor_tpr);
     }
 
     print_summary_table(&summaries);
@@ -103,12 +105,29 @@ fn sort_summaries_by_tpr(summaries: &mut [PlayerSummary]) {
     });
 }
 
+/// TPR_MAX at the anchor rank, if the list is long enough.
+fn tpr_list_anchor(summaries: &[PlayerSummary]) -> Option<i32> {
+    summaries.get(TPR_LIST_ANCHOR_RANK - 1).map(|s| s.max_tpr)
+}
+
 /// Floor TPR_MAX for list membership once the anchor rank is filled.
 fn tpr_list_floor(summaries: &[PlayerSummary]) -> Option<i32> {
-    if summaries.len() < TPR_LIST_ANCHOR_RANK {
-        return None;
+    Some(tpr_list_anchor(summaries)? - TPR_LIST_BAND)
+}
+
+fn maybe_print_new_anchor(list: &str, summaries: &[PlayerSummary], previous: &mut Option<i32>) {
+    let Some(anchor) = tpr_list_anchor(summaries) else {
+        return;
+    };
+    if *previous == Some(anchor) {
+        return;
     }
-    Some(summaries[TPR_LIST_ANCHOR_RANK - 1].max_tpr - TPR_LIST_BAND)
+    *previous = Some(anchor);
+    let holder = &summaries[TPR_LIST_ANCHOR_RANK - 1];
+    println!(
+        "ANCHOR\t{}\t{}\t{}\t{}",
+        list, TPR_LIST_ANCHOR_RANK, holder.name, anchor
+    );
 }
 
 /// Keep everyone until there are [`TPR_LIST_ANCHOR_RANK`] players; then keep
