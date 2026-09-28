@@ -21,7 +21,8 @@ const PROFILE_CALC_URL: &str = "https://ratings.fide.com/profile/{id}/calculatio
 const CALC_URL: &str =
     "https://ratings.fide.com/a_indv_calculation.php?id_number={id}&rating_period={period}&t=0";
 
-const WAIT_MILLIS: u64 = 1_000;
+const WAIT_MILLIS: u64 = 200;
+const CACHE_DIR: &str = "cache";
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Player {
@@ -164,7 +165,7 @@ async fn fetch_period(fide_id: &str, period: &str) -> Result<PeriodResult, Box<d
 }
 
 fn period_cache_path(fide_id: &str, period: &str) -> PathBuf {
-    PathBuf::from(format!("{fide_id}_{period}.json"))
+    PathBuf::from(CACHE_DIR).join(format!("{fide_id}_{period}.json"))
 }
 
 async fn load_period_result(
@@ -181,6 +182,7 @@ async fn save_period_result(
     path: impl AsRef<Path>,
     result: &PeriodResult,
 ) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(CACHE_DIR).await?;
     let text = serde_json::to_string_pretty(result)?;
     fs::write(path, text).await?;
     Ok(())
@@ -308,9 +310,9 @@ async fn fetch_calculations(fide_id: &str, period: &str) -> Result<String, Box<d
 }
 
 fn parse_games(html: &str) -> Result<Vec<Game>, Box<dyn Error>> {
-    // Game rows: <span class="white_note|black_note"> … opponent rating … result (w)
+    // Game rows: color note, then rating cell (may include a "*" marker), fed, result.
     let re = Regex::new(
-        r#"(?s)<span class="(white|black)_note">.*?</span>.*?<td\s+class="list4">(\d+)\s*</td>\s*<td\s+class="list4 table_scale">[A-Z]{3}</td>\s*<td\s+class=list4>(\d+\.\d+)</td>"#,
+        r#"(?s)<span class="(white|black)_note">.*?</span>.*?<td\s+class="list4">(\d+)\b.*?</td>\s*<td\s+class="list4 table_scale">[A-Z]{3}</td>\s*<td\s+class=list4>(\d+\.\d+)</td>"#,
     )?;
 
     Ok(re
@@ -358,6 +360,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_games_with_provisional_rating_marker() {
+        let html = r#"
+				<td class=list4 style="display: flex;align-content: middle; padding-bottom:5px; padding-top: 5px;"><span class="black_note">&nbsp;</span> Costanza, Mitchell</td>
+				<td  class="list4"></td>
+				<td  class="list4 table_scale"></td>
+				<td  class="list4">2407 <font color=blue>&nbsp;*&nbsp;</font></td>
+				<td  class="list4 table_scale">USA</td>
+				<td  class=list4>1.00</td>
+				<td  class="list4">1</td>
+				<td class=list4 style="display: flex;"><span class="white_note">&nbsp;</span> Villamil, Nahum Jose</td>
+				<td  class="list4"></td>
+				<td  class="list4 table_scale"></td>
+				<td  class="list4">2407 <font color=blue>&nbsp;*&nbsp;</font></td>
+				<td  class="list4 table_scale">COL</td>
+				<td  class=list4>1.00</td>
+				<td  class="list4">1</td>"#;
+        let games = parse_games(html).unwrap();
+        assert_eq!(games.len(), 2);
+        assert_eq!(games[0].color, "black");
+        assert_eq!(games[0].opponent_rating, "2407");
+        assert_eq!(games[0].result, "1.00");
+        assert_eq!(games[1].color, "white");
+        assert_eq!(games[1].opponent_rating, "2407");
+    }
+
+    #[test]
     fn parses_profile_periods_with_standard_games() {
         let html = r#"
 			<td width=75 align=right>&nbsp;2026-Sep&nbsp;</td>
@@ -388,8 +416,8 @@ mod tests {
     #[test]
     fn period_cache_path_uses_fide_id_and_period() {
         assert_eq!(
-            period_cache_path("1503014", "2025-09-01").as_os_str(),
-            "1503014_2025-09-01.json"
+            period_cache_path("1503014", "2025-09-01"),
+            PathBuf::from("cache").join("1503014_2025-09-01.json")
         );
     }
 }
