@@ -2,8 +2,11 @@ use chrono::{Datelike, Months, Utc};
 use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokio::fs;
 use tokio::time::sleep;
 
 /// Top-lists page loads player rows via AJAX from this endpoint.
@@ -14,16 +17,25 @@ const TOP_LIST_URL: &str = "https://ratings.fide.com/a_top.php?list=open";
 const CALC_URL: &str =
     "https://ratings.fide.com/a_indv_calculation.php?id_number={id}&rating_period={period}&t=0";
 
+#[derive(Clone, Serialize, Deserialize)]
 struct Player {
     fide_id: String,
     name: String,
     rating: String,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 struct Game {
     color: String,
     opponent_rating: String,
     result: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct PeriodResult {
+    fide_id: String,
+    period: String,
+    games: Vec<Game>,
 }
 
 #[tokio::main]
@@ -36,14 +48,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("{}\t{}\t{}", player.name, player.fide_id, player.rating);
 
         for period in &periods {
-            sleep(Duration::from_millis(200)).await;
-            let html = fetch_calculations(&client, &player.fide_id, period).await?;
-            for game in parse_games(&html)? {
+            let result = load_or_fetch_period(&client, &player.fide_id, period).await?;
+            for game in &result.games {
                 println!(
                     "{}\t{}\t{}\t{}\t{}\t{}",
                     player.name,
                     player.fide_id,
-                    period,
+                    result.period,
                     game.color,
                     game.opponent_rating,
                     game.result
@@ -52,6 +63,50 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    Ok(())
+}
+
+async fn load_or_fetch_period(
+    client: &Client,
+    fide_id: &str,
+    period: &str,
+) -> Result<PeriodResult, Box<dyn Error>> {
+    let path = period_cache_path(fide_id, period);
+    if let Some(result) = load_period_result(&path, fide_id, period).await {
+        return Ok(result);
+    }
+
+    sleep(Duration::from_millis(200)).await;
+    let html = fetch_calculations(client, fide_id, period).await?;
+    let result = PeriodResult {
+        fide_id: fide_id.to_string(),
+        period: period.to_string(),
+        games: parse_games(&html)?,
+    };
+    save_period_result(&path, &result).await?;
+    Ok(result)
+}
+
+fn period_cache_path(fide_id: &str, period: &str) -> PathBuf {
+    PathBuf::from(format!("{fide_id}_{period}.json"))
+}
+
+async fn load_period_result(
+    path: impl AsRef<Path>,
+    fide_id: &str,
+    period: &str,
+) -> Option<PeriodResult> {
+    let text = fs::read_to_string(path).await.ok()?;
+    let result: PeriodResult = serde_json::from_str(&text).ok()?;
+    (result.fide_id == fide_id && result.period == period).then_some(result)
+}
+
+async fn save_period_result(
+    path: impl AsRef<Path>,
+    result: &PeriodResult,
+) -> Result<(), Box<dyn Error>> {
+    let text = serde_json::to_string_pretty(result)?;
+    fs::write(path, text).await?;
     Ok(())
 }
 
@@ -177,5 +232,13 @@ mod tests {
         assert_eq!(&periods[0][8..], "01");
         // contiguous months ending with previous calendar month
         assert!(periods[0] < periods[11]);
+    }
+
+    #[test]
+    fn period_cache_path_uses_fide_id_and_period() {
+        assert_eq!(
+            period_cache_path("1503014", "2025-09-01").as_os_str(),
+            "1503014_2025-09-01.json"
+        );
     }
 }
