@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 window.start_period, window.end_period, window.games, window.tpr
             );
         }
-        println!("TPR_MAX\t{}", report.max_tpr);
+        println!("{}\tTPR_MAX\t{}", player.name, report.max_tpr);
     }
 
     Ok(())
