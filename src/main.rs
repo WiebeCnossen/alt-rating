@@ -115,7 +115,7 @@ fn tpr_report(
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
 
     let total_games: usize = period_games.iter().map(|(_, g)| g.len()).sum();
-    let windows = if total_games <= TPR_GAME_THRESHOLD {
+    let windows = if total_games < TPR_GAME_THRESHOLD {
         let mut games: Vec<(f64, f64)> = period_games
             .iter()
             .flat_map(|(_, g)| g.iter().copied())
@@ -139,7 +139,7 @@ fn tpr_report(
             tpr: tournament_performance_rating(&games),
         }]
     } else {
-        minimal_consecutive_windows(&period_games)
+        consecutive_windows_with_at_least(&period_games, TPR_GAME_THRESHOLD)
             .into_iter()
             .map(|(start, end, games)| TprWindow {
                 start_period: period_games[start].0.clone(),
@@ -158,9 +158,10 @@ fn tpr_report(
     Ok(TprReport { windows, max_tpr })
 }
 
-/// Minimal index ranges [start, end] of consecutive periods with more than 50 games.
-fn minimal_consecutive_windows(
+/// All consecutive period ranges [start, end] with at least `min_games` games.
+fn consecutive_windows_with_at_least(
     period_games: &[(String, Vec<(f64, f64)>)],
+    min_games: usize,
 ) -> Vec<(usize, usize, Vec<(f64, f64)>)> {
     let n = period_games.len();
     let counts: Vec<usize> = period_games.iter().map(|(_, g)| g.len()).collect();
@@ -170,22 +171,13 @@ fn minimal_consecutive_windows(
         let mut total = 0usize;
         for end in start..n {
             total += counts[end];
-            if total <= TPR_GAME_THRESHOLD {
-                continue;
-            }
-            let without_start = total - counts[start];
-            let without_end = total - counts[end];
-            let shrink_start_ok = start == end || without_start <= TPR_GAME_THRESHOLD;
-            let shrink_end_ok = start == end || without_end <= TPR_GAME_THRESHOLD;
-            if shrink_start_ok && shrink_end_ok {
+            if total >= min_games {
                 let games: Vec<(f64, f64)> = period_games[start..=end]
                     .iter()
                     .flat_map(|(_, g)| g.iter().copied())
                     .collect();
                 windows.push((start, end, games));
             }
-            // Further extension only adds games; once >50, longer windows aren't minimal.
-            break;
         }
     }
 
@@ -596,19 +588,17 @@ mod tests {
     }
 
     #[test]
-    fn finds_minimal_consecutive_period_windows() {
+    fn finds_all_consecutive_period_windows_with_enough_games() {
         let periods = vec![
             ("a".into(), vec![(2000.0, 1.0); 30]),
             ("b".into(), vec![(2000.0, 1.0); 30]),
             ("c".into(), vec![(2000.0, 1.0); 30]),
         ];
-        let windows = minimal_consecutive_windows(&periods);
-        assert_eq!(windows.len(), 2);
-        assert_eq!(windows[0].0, 0);
-        assert_eq!(windows[0].1, 1);
-        assert_eq!(windows[0].2.len(), 60);
-        assert_eq!(windows[1].0, 1);
-        assert_eq!(windows[1].1, 2);
+        let windows = consecutive_windows_with_at_least(&periods, 50);
+        assert_eq!(windows.len(), 3);
+        assert_eq!((windows[0].0, windows[0].1, windows[0].2.len()), (0, 1, 60));
+        assert_eq!((windows[1].0, windows[1].1, windows[1].2.len()), (0, 2, 90));
+        assert_eq!((windows[2].0, windows[2].1, windows[2].2.len()), (1, 2, 60));
     }
 
     #[test]
