@@ -1,7 +1,7 @@
 use chrono::{Datelike, Months, Utc};
 use regex::Regex;
-use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use reqwest::Client;
+use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::error::Error;
@@ -22,6 +22,8 @@ const CALC_URL: &str =
     "https://ratings.fide.com/a_indv_calculation.php?id_number={id}&rating_period={period}&t=0";
 
 const WAIT_MILLIS: u64 = 500;
+/// Stop doubling the backoff once the wait exceeds this many milliseconds.
+const WAIT_DOUBLE_LIMIT_MILLIS: u64 = 5_000;
 const CACHE_DIR: &str = "cache";
 const OUTPUT_DIR: &str = "output";
 /// Development coefficient used when checking that |ΔR| < 0.5 at the TPR.
@@ -187,11 +189,18 @@ struct TprReport {
     total_games: usize,
 }
 
-fn tpr_report(
-    results: &[PeriodResult],
-    player_rating: f64,
-) -> Result<TprReport, Box<dyn Error>> {
-    let period_games: Vec<(String, Vec<(f64, f64)>)> = results
+/// Opponent rating and game score (0, 0.5, or 1).
+type RatedGame = (f64, f64);
+type PeriodGameList = (String, Vec<RatedGame>);
+
+struct ConsecutiveWindow {
+    start: usize,
+    end: usize,
+    games: Vec<RatedGame>,
+}
+
+fn tpr_report(results: &[PeriodResult], player_rating: f64) -> Result<TprReport, Box<dyn Error>> {
+    let period_games: Vec<PeriodGameList> = results
         .iter()
         .map(|r| {
             let games = r
@@ -209,7 +218,7 @@ fn tpr_report(
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
 
     let total_games: usize = period_games.iter().map(|(_, g)| g.len()).sum();
-    let mut all_games: Vec<(f64, f64)> = period_games
+    let mut all_games: Vec<RatedGame> = period_games
         .iter()
         .flat_map(|(_, g)| g.iter().copied())
         .collect();
@@ -239,11 +248,11 @@ fn tpr_report(
     } else {
         consecutive_windows_with_at_least(&period_games, TPR_GAME_THRESHOLD)
             .into_iter()
-            .map(|(start, end, games)| TprWindow {
-                start_period: period_games[start].0.clone(),
-                end_period: period_games[end].0.clone(),
-                games: games.len(),
-                tpr: tournament_performance_rating(&games),
+            .map(|window| TprWindow {
+                start_period: period_games[window.start].0.clone(),
+                end_period: period_games[window.end].0.clone(),
+                games: window.games.len(),
+                tpr: tournament_performance_rating(&window.games),
             })
             .collect()
     };
@@ -264,9 +273,9 @@ fn tpr_report(
 /// All consecutive period ranges [start, end] with at least `min_games` games,
 /// excluding ranges that start or end on an empty period.
 fn consecutive_windows_with_at_least(
-    period_games: &[(String, Vec<(f64, f64)>)],
+    period_games: &[PeriodGameList],
     min_games: usize,
-) -> Vec<(usize, usize, Vec<(f64, f64)>)> {
+) -> Vec<ConsecutiveWindow> {
     let n = period_games.len();
     let counts: Vec<usize> = period_games.iter().map(|(_, g)| g.len()).collect();
     let mut windows = Vec::new();
@@ -282,11 +291,11 @@ fn consecutive_windows_with_at_least(
                 continue;
             }
             if total >= min_games {
-                let games: Vec<(f64, f64)> = period_games[start..=end]
+                let games: Vec<RatedGame> = period_games[start..=end]
                     .iter()
                     .flat_map(|(_, g)| g.iter().copied())
                     .collect();
-                windows.push((start, end, games));
+                windows.push(ConsecutiveWindow { start, end, games });
             }
         }
     }
@@ -300,19 +309,19 @@ fn expected_score(player: f64, opponent: f64) -> f64 {
     1.0 / (1.0 + 10f64.powf(-d / 400.0))
 }
 
-fn score_delta(player: f64, games: &[(f64, f64)]) -> f64 {
+fn score_delta(player: f64, games: &[RatedGame]) -> f64 {
     games
         .iter()
         .map(|&(opp, score)| score - expected_score(player, opp))
         .sum()
 }
 
-fn rating_change(player: f64, games: &[(f64, f64)], k: f64) -> f64 {
+fn rating_change(player: f64, games: &[RatedGame], k: f64) -> f64 {
     k * score_delta(player, games)
 }
 
 /// Rating R such that |K·(S−E(R))| is minimized and < 0.5.
-fn tournament_performance_rating(games: &[(f64, f64)]) -> i32 {
+fn tournament_performance_rating(games: &[RatedGame]) -> i32 {
     // score_delta increases with player rating; find crossing near 0.
     let mut lo = 0i32;
     let mut hi = 4500i32;
@@ -325,7 +334,13 @@ fn tournament_performance_rating(games: &[(f64, f64)]) -> i32 {
         }
     }
 
-    let candidates = [lo.saturating_sub(2), lo.saturating_sub(1), lo, lo + 1, lo + 2];
+    let candidates = [
+        lo.saturating_sub(2),
+        lo.saturating_sub(1),
+        lo,
+        lo + 1,
+        lo + 2,
+    ];
     let mut best_r = lo;
     let mut best_abs = f64::INFINITY;
     for r in candidates {
@@ -413,24 +428,15 @@ async fn fetch_period_until_nonempty(
     fide_id: &str,
     period: &str,
 ) -> Result<PeriodResult, Box<dyn Error>> {
-    let mut wait_millis = WAIT_MILLIS;
-    loop {
-        let result = fetch_period(fide_id, period, wait_millis).await?;
-        if !result.games.is_empty() {
-            return Ok(result);
-        }
-        if wait_millis <= 5_000 {
-            wait_millis = wait_millis.saturating_mul(2);
-        }
-    }
-}
-
-async fn fetch_period(
-    fide_id: &str,
-    period: &str,
-    wait_millis: u64,
-) -> Result<PeriodResult, Box<dyn Error>> {
-    let html = fetch_calculations(fide_id, period, wait_millis).await?;
+    let url = CALC_URL
+        .replacen("{id}", fide_id, 1)
+        .replacen("{period}", period, 1);
+    let html = fetch_text_with_retry(&url, |text| {
+        parse_games(text)
+            .map(|games| !games.is_empty())
+            .unwrap_or(false)
+    })
+    .await?;
     Ok(PeriodResult {
         fide_id: fide_id.to_string(),
         period: period.to_string(),
@@ -476,45 +482,66 @@ fn build_client() -> Result<Client, Box<dyn Error>> {
         .build()?)
 }
 
-async fn fetch_players(list: &str) -> Result<Vec<Player>, Box<dyn Error>> {
+/// Wait, then GET `url`. On transport/HTTP failure or rejected body, double the wait
+/// (until over 5s) and retry until `accept` returns true.
+async fn fetch_text_with_retry(
+    url: &str,
+    mut accept: impl FnMut(&str) -> bool,
+) -> Result<String, Box<dyn Error>> {
+    let mut wait_millis = WAIT_MILLIS;
+    loop {
+        sleep(Duration::from_millis(wait_millis)).await;
+        match try_fetch_text(url).await {
+            Ok(text) if accept(&text) => return Ok(text),
+            _ => {
+                if wait_millis <= WAIT_DOUBLE_LIMIT_MILLIS {
+                    wait_millis = wait_millis.saturating_mul(2);
+                }
+            }
+        }
+    }
+}
+
+async fn try_fetch_text(url: &str) -> Result<String, Box<dyn Error>> {
     let client = build_client()?;
-    let url = TOP_LIST_URL.replacen("{list}", list, 1);
-    let html = client
+    Ok(client
         .get(url)
         .send()
         .await?
         .error_for_status()?
         .text()
-        .await?;
-    let re = Regex::new(
-        r#"(?s)<a href=/profile/(\d+)>([^<]+)</a>.*?<td class=rating_column>(\d+)</td>"#,
-    )?;
+        .await?)
+}
 
-    Ok(re
-        .captures_iter(&html)
+async fn fetch_players(list: &str) -> Result<Vec<Player>, Box<dyn Error>> {
+    let url = TOP_LIST_URL.replacen("{list}", list, 1);
+    let html = fetch_text_with_retry(&url, |text| !parse_players(text).is_empty()).await?;
+    Ok(parse_players(&html))
+}
+
+fn parse_players(html: &str) -> Vec<Player> {
+    let Ok(re) = Regex::new(
+        r#"(?s)<a href=/profile/(\d+)>([^<]+)</a>.*?<td class=rating_column>(\d+)</td>"#,
+    ) else {
+        return Vec::new();
+    };
+
+    re.captures_iter(html)
         .map(|caps| Player {
             fide_id: caps[1].to_string(),
             name: caps[2].to_string(),
             rating: caps[3].to_string(),
         })
-        .collect())
+        .collect()
 }
 
 /// Periods on the profile page where standard games (STD GMS) > 0.
 async fn fetch_periods_with_standard_games(
     fide_id: &str,
 ) -> Result<HashSet<String>, Box<dyn Error>> {
-    sleep(Duration::from_millis(WAIT_MILLIS)).await;
     let url = PROFILE_CALC_URL.replacen("{id}", fide_id, 1);
-    let client = build_client()?;
-    let html = client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
-    Ok(parse_periods_with_standard_games(&html)?)
+    let html = fetch_text_with_retry(&url, |text| !text.trim().is_empty()).await?;
+    parse_periods_with_standard_games(&html)
 }
 
 fn parse_periods_with_standard_games(html: &str) -> Result<HashSet<String>, Box<dyn Error>> {
@@ -529,10 +556,9 @@ fn parse_periods_with_standard_games(html: &str) -> Result<HashSet<String>, Box<
         if std_games == 0 {
             continue;
         }
-        let month = month_abbrev_to_number(&caps[2]).ok_or_else(|| {
-            format!("unknown month abbreviation on profile page: {}", &caps[2])
-        })?;
-        periods.insert(format!("{:04}-{:02}-01", &caps[1].parse::<i32>()?, month));
+        let month = month_abbrev_to_number(&caps[2])
+            .ok_or_else(|| format!("unknown month abbreviation on profile page: {}", &caps[2]))?;
+        periods.insert(format!("{:04}-{:02}-01", caps[1].parse::<i32>()?, month));
     }
     Ok(periods)
 }
@@ -567,25 +593,6 @@ fn last_12_complete_months() -> Vec<String> {
             format!("{:04}-{:02}-01", d.year(), d.month())
         })
         .collect()
-}
-
-async fn fetch_calculations(
-    fide_id: &str,
-    period: &str,
-    wait_millis: u64,
-) -> Result<String, Box<dyn Error>> {
-    let url = CALC_URL
-        .replacen("{id}", fide_id, 1)
-        .replacen("{period}", period, 1);
-    sleep(Duration::from_millis(wait_millis)).await;
-    let client = build_client()?;
-    Ok(client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?)
 }
 
 fn parse_games(html: &str) -> Result<Vec<Game>, Box<dyn Error>> {
@@ -709,9 +716,18 @@ mod tests {
         ];
         let windows = consecutive_windows_with_at_least(&periods, 50);
         assert_eq!(windows.len(), 3);
-        assert_eq!((windows[0].0, windows[0].1, windows[0].2.len()), (0, 1, 60));
-        assert_eq!((windows[1].0, windows[1].1, windows[1].2.len()), (0, 2, 90));
-        assert_eq!((windows[2].0, windows[2].1, windows[2].2.len()), (1, 2, 60));
+        assert_eq!(
+            (windows[0].start, windows[0].end, windows[0].games.len()),
+            (0, 1, 60)
+        );
+        assert_eq!(
+            (windows[1].start, windows[1].end, windows[1].games.len()),
+            (0, 2, 90)
+        );
+        assert_eq!(
+            (windows[2].start, windows[2].end, windows[2].games.len()),
+            (1, 2, 60)
+        );
     }
 
     #[test]
@@ -724,12 +740,15 @@ mod tests {
         ];
         let windows = consecutive_windows_with_at_least(&periods, 50);
         assert_eq!(windows.len(), 1);
-        assert_eq!((windows[0].0, windows[0].1, windows[0].2.len()), (1, 2, 60));
+        assert_eq!(
+            (windows[0].start, windows[0].end, windows[0].games.len()),
+            (1, 2, 60)
+        );
     }
 
     #[test]
     fn tpr_is_near_opponent_rating_for_even_score() {
-        let games: Vec<(f64, f64)> = (0..50).map(|_| (2500.0, 0.5)).collect();
+        let games: Vec<RatedGame> = (0..50).map(|_| (2500.0, 0.5)).collect();
         let tpr = tournament_performance_rating(&games);
         assert!((tpr - 2500).abs() <= 1);
         assert!(rating_change(tpr as f64, &games, RATING_K).abs() < 0.5);
