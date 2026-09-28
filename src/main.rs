@@ -1,10 +1,10 @@
 use chrono::{Datelike, Months, Utc};
 use regex::Regex;
-use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::Client;
 use std::error::Error;
-use std::thread;
 use std::time::Duration;
+use tokio::time::sleep;
 
 /// Top-lists page loads player rows via AJAX from this endpoint.
 const TOP_LIST_URL: &str = "https://ratings.fide.com/a_top.php?list=open";
@@ -26,17 +26,18 @@ struct Game {
     result: String,
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let client = build_client()?;
-    let players = fetch_players(&client)?;
+    let players = fetch_players(&client).await?;
     let periods = last_12_complete_months();
 
     for player in &players {
         println!("{}\t{}\t{}", player.name, player.fide_id, player.rating);
 
         for period in &periods {
-            thread::sleep(Duration::from_millis(200));
-            let html = fetch_calculations(&client, &player.fide_id, period)?;
+            sleep(Duration::from_millis(200)).await;
+            let html = fetch_calculations(&client, &player.fide_id, period).await?;
             for game in parse_games(&html)? {
                 println!(
                     "{}\t{}\t{}\t{}\t{}\t{}",
@@ -65,8 +66,14 @@ fn build_client() -> Result<Client, Box<dyn Error>> {
     Ok(Client::builder().default_headers(headers).build()?)
 }
 
-fn fetch_players(client: &Client) -> Result<Vec<Player>, Box<dyn Error>> {
-    let html = client.get(TOP_LIST_URL).send()?.error_for_status()?.text()?;
+async fn fetch_players(client: &Client) -> Result<Vec<Player>, Box<dyn Error>> {
+    let html = client
+        .get(TOP_LIST_URL)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
     let re = Regex::new(
         r#"(?s)<a href=/profile/(\d+)>([^<]+)</a>.*?<td class=rating_column>(\d+)</td>"#,
     )?;
@@ -95,7 +102,7 @@ fn last_12_complete_months() -> Vec<String> {
         .collect()
 }
 
-fn fetch_calculations(
+async fn fetch_calculations(
     client: &Client,
     fide_id: &str,
     period: &str,
@@ -103,7 +110,13 @@ fn fetch_calculations(
     let url = CALC_URL
         .replacen("{id}", fide_id, 1)
         .replacen("{period}", period, 1);
-    Ok(client.get(url).send()?.error_for_status()?.text()?)
+    Ok(client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?)
 }
 
 fn parse_games(html: &str) -> Result<Vec<Game>, Box<dyn Error>> {
