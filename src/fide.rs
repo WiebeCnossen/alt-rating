@@ -75,6 +75,7 @@ async fn fetch_periods_using_profile(
         }
     }
 
+    println!();
     Ok(results)
 }
 

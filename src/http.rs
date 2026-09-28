@@ -1,10 +1,11 @@
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use std::error::Error;
+use std::io::Write;
 use std::time::Duration;
 use tokio::time::sleep;
 
-const WAIT_MILLIS: u64 = 500;
+const WAIT_MILLIS: u64 = 100;
 /// Stop doubling the backoff once the wait exceeds this many milliseconds.
 const WAIT_DOUBLE_LIMIT_MILLIS: u64 = 5_000;
 
@@ -30,6 +31,8 @@ pub async fn fetch_text_with_retry(
 ) -> Result<String, Box<dyn Error>> {
     let mut wait_millis = WAIT_MILLIS;
     loop {
+        print!(".");
+        std::io::stdout().flush().expect("Failed to flush stdout");
         sleep(Duration::from_millis(wait_millis)).await;
         match try_fetch_text(url).await {
             Ok(text) if accept(&text) => return Ok(text),

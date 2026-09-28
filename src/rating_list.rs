@@ -7,9 +7,6 @@ use zip::ZipArchive;
 /// Full standard rating list (zipped fixed-width text).
 const STANDARD_RATING_LIST_URL: &str = "https://ratings.fide.com/download/standard_rating_list.zip";
 
-/// Include players rated at least this many points below the group leader.
-const TOP_RATING_BAND: u32 = 250;
-
 /// Fixed-width columns in `standard_rating_list.txt`.
 const COL_ID: std::ops::Range<usize> = 0..15;
 const COL_NAME: std::ops::Range<usize> = 15..76;
@@ -17,7 +14,7 @@ const COL_SEX: usize = 80;
 const COL_RATING: std::ops::Range<usize> = 113..119;
 const COL_FLAG_START: usize = 132;
 
-/// Download the standard rating list and return the top active men and women.
+/// Download the standard rating list and return active men and women, highest rating first.
 pub async fn fetch_top_players() -> Result<(Vec<Player>, Vec<Player>), Box<dyn Error>> {
     let bytes =
         fetch_bytes_with_retry(STANDARD_RATING_LIST_URL, |bytes| bytes.starts_with(b"PK")).await?;
@@ -63,33 +60,19 @@ fn parse_top_players_from_rating_list(
         }
     }
 
-    men.sort_by(|a, b| {
+    let by_rating_desc = |a: &Player, b: &Player| {
         b.rating
             .parse::<u32>()
             .unwrap_or(0)
             .cmp(&a.rating.parse::<u32>().unwrap_or(0))
-    });
-    women.sort_by(|a, b| {
-        b.rating
-            .parse::<u32>()
-            .unwrap_or(0)
-            .cmp(&a.rating.parse::<u32>().unwrap_or(0))
-    });
-    retain_within_rating_band(&mut men);
-    retain_within_rating_band(&mut women);
+    };
+    men.sort_by(by_rating_desc);
+    women.sort_by(by_rating_desc);
 
     if men.is_empty() || women.is_empty() {
         return Err("rating list did not yield players".into());
     }
     Ok((men, women))
-}
-
-fn retain_within_rating_band(players: &mut Vec<Player>) {
-    let Some(top) = players.first().and_then(|p| p.rating.parse::<u32>().ok()) else {
-        return;
-    };
-    let floor = top.saturating_sub(TOP_RATING_BAND);
-    players.retain(|p| p.rating.parse::<u32>().unwrap_or(0) >= floor);
 }
 
 #[cfg(test)]
@@ -111,7 +94,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_rating_list_skipping_inactive_and_taking_top_by_sex() {
+    fn parses_rating_list_skipping_inactive_and_sorting_by_rating() {
         let text = [
             "ID Number      Name                                                         Fed Sex Tit  WTit OTit           FOA SEP26 Gms K  B-day Flag".to_string(),
             rating_list_line("1", "Low, Man", 'M', 2000, ""),
@@ -126,15 +109,15 @@ mod tests {
         .join("\n");
 
         let (men, women) = parse_top_players_from_rating_list(&text).unwrap();
-        // Men: top 2800 => floor 2550; include 2800 and 2550, not 2000.
-        assert_eq!(men.len(), 2);
-        assert_eq!(men[0].fide_id, "2");
-        assert_eq!(men[1].fide_id, "4");
+        assert_eq!(
+            men.iter().map(|p| p.fide_id.as_str()).collect::<Vec<_>>(),
+            vec!["2", "4", "1"]
+        );
+        assert_eq!(
+            women.iter().map(|p| p.fide_id.as_str()).collect::<Vec<_>>(),
+            vec!["5", "7", "8"]
+        );
         assert!(men.iter().all(|p| p.fide_id != "3"));
-        // Women: top 2500 => floor 2250; include 2500 and 2400, not 2200.
-        assert_eq!(women.len(), 2);
-        assert_eq!(women[0].fide_id, "5");
-        assert_eq!(women[1].fide_id, "7");
         assert!(women.iter().all(|p| p.fide_id != "6"));
     }
 }
