@@ -16,12 +16,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .error_for_status()?
         .text()?;
 
-    let re = Regex::new(r#"<a href=/profile/(\d+)>([^<]+)</a>"#)?;
+    let re = Regex::new(
+        r#"(?s)<a href=/profile/(\d+)>([^<]+)</a>.*?<td class=rating_column>(\d+)</td>"#,
+    )?;
 
     for caps in re.captures_iter(&html) {
         let fide_id = &caps[1];
         let name = &caps[2];
-        println!("{name}\t{fide_id}");
+        let rating = &caps[3];
+        println!("{name}\t{fide_id}\t{rating}");
     }
 
     Ok(())
