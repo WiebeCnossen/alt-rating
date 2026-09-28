@@ -158,7 +158,8 @@ fn tpr_report(
     Ok(TprReport { windows, max_tpr })
 }
 
-/// All consecutive period ranges [start, end] with at least `min_games` games.
+/// All consecutive period ranges [start, end] with at least `min_games` games,
+/// excluding ranges that start or end on an empty period.
 fn consecutive_windows_with_at_least(
     period_games: &[(String, Vec<(f64, f64)>)],
     min_games: usize,
@@ -168,9 +169,15 @@ fn consecutive_windows_with_at_least(
     let mut windows = Vec::new();
 
     for start in 0..n {
+        if counts[start] == 0 {
+            continue;
+        }
         let mut total = 0usize;
         for end in start..n {
             total += counts[end];
+            if counts[end] == 0 {
+                continue;
+            }
             if total >= min_games {
                 let games: Vec<(f64, f64)> = period_games[start..=end]
                     .iter()
@@ -599,6 +606,19 @@ mod tests {
         assert_eq!((windows[0].0, windows[0].1, windows[0].2.len()), (0, 1, 60));
         assert_eq!((windows[1].0, windows[1].1, windows[1].2.len()), (0, 2, 90));
         assert_eq!((windows[2].0, windows[2].1, windows[2].2.len()), (1, 2, 60));
+    }
+
+    #[test]
+    fn omits_windows_that_start_or_end_on_empty_period() {
+        let periods = vec![
+            ("empty".into(), vec![]),
+            ("a".into(), vec![(2000.0, 1.0); 30]),
+            ("b".into(), vec![(2000.0, 1.0); 30]),
+            ("also_empty".into(), vec![]),
+        ];
+        let windows = consecutive_windows_with_at_least(&periods, 50);
+        assert_eq!(windows.len(), 1);
+        assert_eq!((windows[0].0, windows[0].1, windows[0].2.len()), (1, 2, 60));
     }
 
     #[test]
