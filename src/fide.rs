@@ -37,6 +37,7 @@ pub async fn periods_for_player(
     periods: &[String],
     recent_month_games: u32,
     max_attempts: u32,
+    initial_wait_millis: u64,
 ) -> Result<PeriodsFetch, Box<dyn Error>> {
     let cached = load_cached_period_results(fide_id, periods).await;
     let missing: Vec<usize> = cached
@@ -48,7 +49,14 @@ pub async fn periods_for_player(
     if missing.is_empty() {
         let results: Vec<PeriodResult> = cached.into_iter().map(Option::unwrap).collect();
         if results.iter().all(|r| r.games.is_empty()) {
-            return fetch_periods_using_profile(fide_id, periods, true, max_attempts).await;
+            return fetch_periods_using_profile(
+                fide_id,
+                periods,
+                true,
+                max_attempts,
+                initial_wait_millis,
+            )
+            .await;
         }
         return Ok(PeriodsFetch::Complete {
             results,
@@ -71,7 +79,9 @@ pub async fn periods_for_player(
                 false,
             )
         } else {
-            match fetch_period_until_nonempty(fide_id, period, max_attempts).await {
+            match fetch_period_until_nonempty(fide_id, period, max_attempts, initial_wait_millis)
+                .await
+            {
                 Ok(result) => (result, true),
                 Err(err) if is_retry_limit(err.as_ref()) => return Ok(PeriodsFetch::Incomplete),
                 Err(err) => return Err(err),
@@ -91,7 +101,7 @@ pub async fn periods_for_player(
         });
     }
 
-    fetch_periods_using_profile(fide_id, periods, false, max_attempts).await
+    fetch_periods_using_profile(fide_id, periods, false, max_attempts, initial_wait_millis).await
 }
 
 async fn fetch_periods_using_profile(
@@ -99,12 +109,14 @@ async fn fetch_periods_using_profile(
     periods: &[String],
     force_refresh: bool,
     max_attempts: u32,
+    initial_wait_millis: u64,
 ) -> Result<PeriodsFetch, Box<dyn Error>> {
-    let active = match fetch_periods_with_standard_games(fide_id, max_attempts).await {
-        Ok(active) => active,
-        Err(err) if is_retry_limit(err.as_ref()) => return Ok(PeriodsFetch::Incomplete),
-        Err(err) => return Err(err),
-    };
+    let active =
+        match fetch_periods_with_standard_games(fide_id, max_attempts, initial_wait_millis).await {
+            Ok(active) => active,
+            Err(err) if is_retry_limit(err.as_ref()) => return Ok(PeriodsFetch::Incomplete),
+            Err(err) => return Err(err),
+        };
     let mut results = Vec::with_capacity(periods.len());
     let mut downloaded = false;
 
@@ -121,7 +133,14 @@ async fn fetch_periods_using_profile(
                 Some(cached) if !cached.games.is_empty() => cached,
                 _ => {
                     remove_period_cache(&path).await;
-                    match fetch_period_until_nonempty(fide_id, period, max_attempts).await {
+                    match fetch_period_until_nonempty(
+                        fide_id,
+                        period,
+                        max_attempts,
+                        initial_wait_millis,
+                    )
+                    .await
+                    {
                         Ok(result) => {
                             downloaded = true;
                             result
@@ -157,11 +176,12 @@ async fn fetch_period_until_nonempty(
     fide_id: &str,
     period: &str,
     max_attempts: u32,
+    initial_wait_millis: u64,
 ) -> Result<PeriodResult, Box<dyn Error>> {
     let url = CALC_URL
         .replacen("{id}", fide_id, 1)
         .replacen("{period}", period, 1);
-    let html = fetch_text_with_retry(&url, max_attempts, |text| {
+    let html = fetch_text_with_retry(&url, max_attempts, initial_wait_millis, |text| {
         parse_games(text)
             .map(|games| !games.is_empty())
             .unwrap_or(false)
@@ -178,9 +198,13 @@ async fn fetch_period_until_nonempty(
 async fn fetch_periods_with_standard_games(
     fide_id: &str,
     max_attempts: u32,
+    initial_wait_millis: u64,
 ) -> Result<HashSet<String>, Box<dyn Error>> {
     let url = PROFILE_CALC_URL.replacen("{id}", fide_id, 1);
-    let html = fetch_text_with_retry(&url, max_attempts, |text| !text.trim().is_empty()).await?;
+    let html = fetch_text_with_retry(&url, max_attempts, initial_wait_millis, |text| {
+        !text.trim().is_empty()
+    })
+    .await?;
     parse_periods_with_standard_games(&html)
 }
 

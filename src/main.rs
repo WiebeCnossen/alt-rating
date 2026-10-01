@@ -8,6 +8,7 @@ mod rating_list;
 mod tpr;
 
 use clap::Parser;
+use http::DEFAULT_WAIT_MILLIS;
 use output::{print_summary_table, summary_csv_path, write_summary_csv};
 use pipeline::{last_12_complete_months, process_players};
 use rating_list::fetch_top_players;
@@ -19,6 +20,10 @@ struct Args {
     /// Maximum fetch attempts (initial try + retries) before giving up.
     #[arg(long, default_value_t = 8)]
     retries: u32,
+
+    /// Initial wait before each fetch attempt, in milliseconds (doubles on retry).
+    #[arg(long, default_value_t = DEFAULT_WAIT_MILLIS)]
+    wait: u64,
 }
 
 #[tokio::main]
@@ -26,10 +31,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     println!("INIT");
     let periods = last_12_complete_months();
-    let (men_players, women_players) = fetch_top_players(args.retries).await?;
+    let (men_players, women_players) = fetch_top_players(args.retries, args.wait).await?;
 
-    let men = process_players("open", &men_players, &periods, args.retries).await?;
-    let women = process_players("women", &women_players, &periods, args.retries).await?;
+    let men = process_players("open", &men_players, &periods, args.retries, args.wait).await?;
+    let women = process_players("women", &women_players, &periods, args.retries, args.wait).await?;
 
     let mut incomplete = men.incomplete;
     incomplete.extend(women.incomplete);

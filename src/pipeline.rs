@@ -38,6 +38,7 @@ pub async fn process_players(
     players: &[Player],
     periods: &[String],
     max_attempts: u32,
+    initial_wait_millis: u64,
 ) -> Result<ProcessOutcome, Box<dyn Error>> {
     let mut summaries = Vec::new();
     let mut incomplete = Vec::new();
@@ -59,37 +60,41 @@ pub async fn process_players(
 
         println!("{}\t{}\t{}", player.name, player.fide_id, player.rating);
 
-        let results =
-            match periods_for_player(&player.fide_id, periods, player.recent_games, max_attempts)
-                .await?
-            {
-                PeriodsFetch::Complete {
-                    results,
-                    downloaded,
-                } => {
-                    if downloaded {
-                        println!("COMPLETE\t{}\t{}", player.name, player.fide_id);
-                    }
-                    results
+        let results = match periods_for_player(
+            &player.fide_id,
+            periods,
+            player.recent_games,
+            max_attempts,
+            initial_wait_millis,
+        )
+        .await?
+        {
+            PeriodsFetch::Complete {
+                results,
+                downloaded,
+            } => {
+                if downloaded {
+                    println!("COMPLETE\t{}\t{}", player.name, player.fide_id);
                 }
-                PeriodsFetch::Incomplete => {
-                    println!("INCOMPLETE\t{}\t{}", player.name, player.fide_id);
-                    incomplete.push(IncompletePlayer {
-                        name: player.name.clone(),
-                        fide_id: player.fide_id.clone(),
-                    });
-                    // Tighten the scan once the 30th exists; keep summaries so the
-                    // list can still grow toward the anchor for cutoff purposes.
-                    if let Some(tight_floor) = tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE)
-                        .or_else(|| anchor_elo_year.map(|a| a - TPR_LIST_BAND_INCOMPLETE))
-                    {
-                        rating_floor =
-                            Some(rating_floor.map_or(tight_floor, |f| f.max(tight_floor)));
-                        retain_within_tpr_band(&mut summaries, TPR_LIST_BAND_INCOMPLETE);
-                    }
-                    continue;
+                results
+            }
+            PeriodsFetch::Incomplete => {
+                println!("INCOMPLETE\t{}\t{}", player.name, player.fide_id);
+                incomplete.push(IncompletePlayer {
+                    name: player.name.clone(),
+                    fide_id: player.fide_id.clone(),
+                });
+                // Tighten the scan once the 30th exists; keep summaries so the
+                // list can still grow toward the anchor for cutoff purposes.
+                if let Some(tight_floor) = tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE)
+                    .or_else(|| anchor_elo_year.map(|a| a - TPR_LIST_BAND_INCOMPLETE))
+                {
+                    rating_floor = Some(rating_floor.map_or(tight_floor, |f| f.max(tight_floor)));
+                    retain_within_tpr_band(&mut summaries, TPR_LIST_BAND_INCOMPLETE);
                 }
-            };
+                continue;
+            }
+        };
 
         let total_games: usize = results.iter().map(|r| r.games.len()).sum();
         if total_games < MIN_GAMES {

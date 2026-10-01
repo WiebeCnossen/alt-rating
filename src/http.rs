@@ -5,7 +5,8 @@ use std::fmt;
 use std::time::Duration;
 use tokio::time::sleep;
 
-const WAIT_MILLIS: u64 = 100;
+/// Default initial wait before each fetch attempt (milliseconds).
+pub const DEFAULT_WAIT_MILLIS: u64 = 100;
 /// Stop doubling the backoff once the wait exceeds this many milliseconds.
 const WAIT_DOUBLE_LIMIT_MILLIS: u64 = 5_000;
 
@@ -46,9 +47,10 @@ fn build_client() -> Result<Client, Box<dyn Error>> {
 pub async fn fetch_text_with_retry(
     url: &str,
     max_attempts: u32,
+    initial_wait_millis: u64,
     mut accept: impl FnMut(&str) -> bool,
 ) -> Result<String, Box<dyn Error>> {
-    let mut wait_millis = WAIT_MILLIS;
+    let mut wait_millis = initial_wait_millis;
     for _ in 0..max_attempts {
         sleep(Duration::from_millis(wait_millis)).await;
         match try_fetch_text(url).await {
@@ -92,9 +94,10 @@ async fn try_fetch_bytes(url: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 pub async fn fetch_bytes_with_retry(
     url: &str,
     max_attempts: u32,
+    initial_wait_millis: u64,
     mut accept: impl FnMut(&[u8]) -> bool,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let mut wait_millis = WAIT_MILLIS;
+    let mut wait_millis = initial_wait_millis;
     for _ in 0..max_attempts {
         sleep(Duration::from_millis(wait_millis)).await;
         match try_fetch_bytes(url).await {

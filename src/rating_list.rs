@@ -26,6 +26,7 @@ static RATING_LIST_PERIOD_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Load the current-month standard rating list from cache, or download it.
 pub async fn fetch_top_players(
     max_attempts: u32,
+    initial_wait_millis: u64,
 ) -> Result<(Vec<Player>, Vec<Player>), Box<dyn Error>> {
     let today = Utc::now().date_naive();
     let year = today.year();
@@ -39,9 +40,12 @@ pub async fn fetch_top_players(
         return parse_top_players_from_rating_list(&text);
     }
 
-    let bytes = fetch_bytes_with_retry(STANDARD_RATING_LIST_URL, max_attempts, |bytes| {
-        bytes.starts_with(b"PK")
-    })
+    let bytes = fetch_bytes_with_retry(
+        STANDARD_RATING_LIST_URL,
+        max_attempts,
+        initial_wait_millis,
+        |bytes| bytes.starts_with(b"PK"),
+    )
     .await?;
     let text = rating_list_text_from_zip(&bytes)?;
     let (list_year, list_month) = parse_rating_list_period(&text)?;
