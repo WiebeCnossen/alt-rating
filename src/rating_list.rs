@@ -27,11 +27,10 @@ static RATING_LIST_PERIOD_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub async fn fetch_top_players(
     max_attempts: u32,
 ) -> Result<(Vec<Player>, Vec<Player>), Box<dyn Error>> {
-    let bytes =
-        fetch_bytes_with_retry(STANDARD_RATING_LIST_URL, max_attempts, |bytes| {
-            bytes.starts_with(b"PK")
-        })
-        .await?;
+    let bytes = fetch_bytes_with_retry(STANDARD_RATING_LIST_URL, max_attempts, |bytes| {
+        bytes.starts_with(b"PK")
+    })
+    .await?;
     let text = rating_list_text_from_zip(&bytes)?;
     let (year, month) = parse_rating_list_period(&text)?;
     save_standard_rating_list(year, month, &text).await?;
@@ -49,10 +48,7 @@ fn rating_list_text_from_zip(bytes: &[u8]) -> Result<String, Box<dyn Error>> {
 
 /// Period encoded in the header rating column, e.g. `SEP26` → `(2026, 9)`.
 fn parse_rating_list_period(text: &str) -> Result<(i32, u32), Box<dyn Error>> {
-    let header = text
-        .lines()
-        .next()
-        .ok_or("rating list is empty")?;
+    let header = text.lines().next().ok_or("rating list is empty")?;
     let caps = RATING_LIST_PERIOD_RE
         .captures(header)
         .ok_or("rating list header has no period like SEP26")?;

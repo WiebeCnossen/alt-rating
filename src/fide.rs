@@ -2,7 +2,7 @@ use crate::cache::{
     load_cached_period_results, load_period_result, period_cache_path, remove_period_cache,
     save_period_result,
 };
-use crate::http::{fetch_text_with_retry, RetryLimitReached};
+use crate::http::{RetryLimitReached, fetch_text_with_retry};
 use crate::model::{Game, PeriodResult};
 use regex::Regex;
 use std::collections::HashSet;
@@ -161,15 +161,11 @@ async fn fetch_period_until_nonempty(
     let url = CALC_URL
         .replacen("{id}", fide_id, 1)
         .replacen("{period}", period, 1);
-    let html = fetch_text_with_retry(
-        &url,
-        max_attempts,
-        |text| {
-            parse_games(text)
-                .map(|games| !games.is_empty())
-                .unwrap_or(false)
-        },
-    )
+    let html = fetch_text_with_retry(&url, max_attempts, |text| {
+        parse_games(text)
+            .map(|games| !games.is_empty())
+            .unwrap_or(false)
+    })
     .await?;
     Ok(PeriodResult {
         fide_id: fide_id.to_string(),

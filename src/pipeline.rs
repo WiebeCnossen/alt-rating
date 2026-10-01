@@ -1,4 +1,4 @@
-use crate::fide::{periods_for_player, PeriodsFetch};
+use crate::fide::{PeriodsFetch, periods_for_player};
 use crate::model::{IncompletePlayer, Player, PlayerSummary};
 use crate::tpr::{summary_from_report, tpr_report};
 use chrono::{Datelike, Months, Utc};
