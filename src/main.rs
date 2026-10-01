@@ -10,7 +10,7 @@ mod tpr;
 use clap::Parser;
 use http::DEFAULT_WAIT_MILLIS;
 use output::{print_summary_table, summary_csv_path, write_summary_csv};
-use pipeline::{last_12_complete_months, process_players};
+use pipeline::{complete_incomplete_players, last_12_complete_months, process_players};
 use rating_list::fetch_top_players;
 use std::error::Error;
 
@@ -33,23 +33,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let periods = last_12_complete_months();
     let (men_players, women_players) = fetch_top_players(args.retries, args.wait).await?;
 
-    let men = process_players("open", &men_players, &periods, args.retries, args.wait).await?;
-    let women = process_players("women", &women_players, &periods, args.retries, args.wait).await?;
+    loop {
+        let men = process_players("open", &men_players, &periods, args.retries, args.wait).await?;
+        let women =
+            process_players("women", &women_players, &periods, args.retries, args.wait).await?;
 
-    let mut incomplete = men.incomplete;
-    incomplete.extend(women.incomplete);
-    if !incomplete.is_empty() {
-        println!("INCOMPLETE_REMAINING\t{}", incomplete.len());
-        for player in &incomplete {
-            println!("INCOMPLETE\t{}\t{}", player.name, player.fide_id);
+        let mut incomplete = men.incomplete;
+        incomplete.extend(women.incomplete);
+        if !incomplete.is_empty() {
+            println!("INCOMPLETE_REMAINING\t{}", incomplete.len());
+            for player in &incomplete {
+                println!("INCOMPLETE\t{}\t{}", player.name, player.fide_id);
+            }
+            complete_incomplete_players(&incomplete, &periods, args.retries, args.wait).await?;
+            println!("RESTART");
+            continue;
         }
-        std::process::exit(1);
-    }
 
-    print_summary_table(&men.summaries);
-    print_summary_table(&women.summaries);
-    write_summary_csv(summary_csv_path("open"), &men.summaries).await?;
-    write_summary_csv(summary_csv_path("women"), &women.summaries).await?;
-    println!("INCOMPLETE_REMAINING\t0");
-    Ok(())
+        print_summary_table(&men.summaries);
+        print_summary_table(&women.summaries);
+        write_summary_csv(summary_csv_path("open"), &men.summaries).await?;
+        write_summary_csv(summary_csv_path("women"), &women.summaries).await?;
+        println!("INCOMPLETE_REMAINING\t0");
+        return Ok(());
+    }
 }

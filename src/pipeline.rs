@@ -83,6 +83,7 @@ pub async fn process_players(
                 incomplete.push(IncompletePlayer {
                     name: player.name.clone(),
                     fide_id: player.fide_id.clone(),
+                    recent_games: player.recent_games,
                 });
                 // Tighten the scan once the 30th exists; keep summaries so the
                 // list can still grow toward the anchor for cutoff purposes.
@@ -151,6 +152,42 @@ pub async fn process_players(
         summaries,
         incomplete,
     })
+}
+
+/// Retry period fetches for incomplete players until every one is complete.
+pub async fn complete_incomplete_players(
+    players: &[IncompletePlayer],
+    periods: &[String],
+    max_attempts: u32,
+    initial_wait_millis: u64,
+) -> Result<(), Box<dyn Error>> {
+    let mut remaining: Vec<IncompletePlayer> = players.to_vec();
+    while !remaining.is_empty() {
+        println!("INCOMPLETE_RETRY\t{}", remaining.len());
+        let mut still_incomplete = Vec::new();
+        for player in &remaining {
+            println!("{}\t{}\tretry", player.name, player.fide_id);
+            match periods_for_player(
+                &player.fide_id,
+                periods,
+                player.recent_games,
+                max_attempts,
+                initial_wait_millis,
+            )
+            .await?
+            {
+                PeriodsFetch::Complete { .. } => {
+                    println!("COMPLETE\t{}\t{}", player.name, player.fide_id);
+                }
+                PeriodsFetch::Incomplete => {
+                    println!("INCOMPLETE\t{}\t{}", player.name, player.fide_id);
+                    still_incomplete.push(player.clone());
+                }
+            }
+        }
+        remaining = still_incomplete;
+    }
+    Ok(())
 }
 
 fn sort_summaries_by_tpr(summaries: &mut [PlayerSummary]) {
