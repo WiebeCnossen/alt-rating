@@ -1,13 +1,31 @@
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use std::error::Error;
-use std::io::Write;
+use std::fmt;
 use std::time::Duration;
 use tokio::time::sleep;
 
 const WAIT_MILLIS: u64 = 100;
 /// Stop doubling the backoff once the wait exceeds this many milliseconds.
 const WAIT_DOUBLE_LIMIT_MILLIS: u64 = 5_000;
+
+#[derive(Debug)]
+pub struct RetryLimitReached {
+    pub url: String,
+    pub attempts: u32,
+}
+
+impl fmt::Display for RetryLimitReached {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "fetch failed after {} attempts: {}",
+            self.attempts, self.url
+        )
+    }
+}
+
+impl Error for RetryLimitReached {}
 
 fn build_client() -> Result<Client, Box<dyn Error>> {
     let mut headers = HeaderMap::new();
@@ -24,15 +42,14 @@ fn build_client() -> Result<Client, Box<dyn Error>> {
 }
 
 /// Wait, then GET `url`. On transport/HTTP failure or rejected body, double the wait
-/// (until over 5s) and retry until `accept` returns true.
+/// (until over 5s) and retry up to `max_attempts` times until `accept` returns true.
 pub async fn fetch_text_with_retry(
     url: &str,
+    max_attempts: u32,
     mut accept: impl FnMut(&str) -> bool,
 ) -> Result<String, Box<dyn Error>> {
     let mut wait_millis = WAIT_MILLIS;
-    loop {
-        print!(".");
-        std::io::stdout().flush().expect("Failed to flush stdout");
+    for _ in 0..max_attempts {
         sleep(Duration::from_millis(wait_millis)).await;
         match try_fetch_text(url).await {
             Ok(text) if accept(&text) => return Ok(text),
@@ -43,6 +60,10 @@ pub async fn fetch_text_with_retry(
             }
         }
     }
+    Err(Box::new(RetryLimitReached {
+        url: url.to_string(),
+        attempts: max_attempts,
+    }))
 }
 
 async fn try_fetch_text(url: &str) -> Result<String, Box<dyn Error>> {
@@ -70,10 +91,11 @@ async fn try_fetch_bytes(url: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 
 pub async fn fetch_bytes_with_retry(
     url: &str,
+    max_attempts: u32,
     mut accept: impl FnMut(&[u8]) -> bool,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut wait_millis = WAIT_MILLIS;
-    loop {
+    for _ in 0..max_attempts {
         sleep(Duration::from_millis(wait_millis)).await;
         match try_fetch_bytes(url).await {
             Ok(bytes) if accept(&bytes) => return Ok(bytes),
@@ -84,4 +106,8 @@ pub async fn fetch_bytes_with_retry(
             }
         }
     }
+    Err(Box::new(RetryLimitReached {
+        url: url.to_string(),
+        attempts: max_attempts,
+    }))
 }

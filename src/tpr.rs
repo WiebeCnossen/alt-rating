@@ -14,7 +14,7 @@ pub struct TprWindow {
 
 pub struct TprReport {
     pub windows: Vec<TprWindow>,
-    pub max_tpr: i32,
+    pub elo_year: i32,
     pub all_games_tpr: i32,
     pub raw_games_tpr: i32,
     pub total_games: usize,
@@ -94,14 +94,19 @@ pub fn tpr_report(
             .collect()
     };
 
-    let max_tpr = windows
-        .iter()
-        .map(|w| w.tpr)
-        .max()
-        .ok_or("no TPR windows")?;
+    let elo_year = if total_games < TPR_GAME_THRESHOLD {
+        let games_short = (TPR_GAME_THRESHOLD - total_games) as i32;
+        all_games_tpr.min(raw_games_tpr - 2 * games_short)
+    } else {
+        windows
+            .iter()
+            .map(|w| w.tpr)
+            .max()
+            .ok_or("no TPR windows")?
+    };
     Ok(TprReport {
         windows,
-        max_tpr,
+        elo_year,
         all_games_tpr,
         raw_games_tpr,
         total_games,
@@ -112,7 +117,7 @@ pub fn summary_from_report(name: String, rating: String, report: &TprReport) -> 
     PlayerSummary {
         name,
         rating,
-        max_tpr: report.max_tpr,
+        elo_year: report.elo_year,
         all_games_tpr: report.all_games_tpr,
         raw_games_tpr: report.raw_games_tpr,
         total_games: report.total_games,
@@ -255,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn tpr_pads_virtual_draws_when_under_threshold() {
+    fn elo_year_is_min_of_stuffed_and_penalized_raw_when_under_threshold() {
         let results = vec![PeriodResult {
             fide_id: "1".into(),
             period: "2025-09-01".into(),
@@ -268,5 +273,9 @@ mod tests {
         let report = tpr_report(&results, 2500.0).unwrap();
         assert_eq!(report.windows.len(), 1);
         assert_eq!(report.windows[0].games, 1);
+        let games_short = (TPR_GAME_THRESHOLD - 1) as i32;
+        let penalized_raw = report.raw_games_tpr - 2 * games_short;
+        assert_eq!(report.elo_year, report.all_games_tpr.min(penalized_raw));
+        assert_ne!(report.all_games_tpr, report.raw_games_tpr);
     }
 }

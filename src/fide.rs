@@ -1,12 +1,16 @@
 use crate::cache::{
-    load_all_period_results, load_period_result, period_cache_path, remove_period_cache,
+    load_cached_period_results, load_period_result, period_cache_path, remove_period_cache,
     save_period_result,
 };
-use crate::http::fetch_text_with_retry;
+use crate::http::{fetch_text_with_retry, RetryLimitReached};
 use crate::model::{Game, PeriodResult};
 use regex::Regex;
 use std::collections::HashSet;
 use std::error::Error;
+
+fn is_retry_limit(err: &Box<dyn Error>) -> bool {
+    err.is::<RetryLimitReached>()
+}
 
 /// Profile calculations tab lists periods and game counts.
 const PROFILE_CALC_URL: &str = "https://ratings.fide.com/profile/{id}/calculations";
@@ -16,34 +20,93 @@ const PROFILE_CALC_URL: &str = "https://ratings.fide.com/profile/{id}/calculatio
 const CALC_URL: &str =
     "https://ratings.fide.com/a_indv_calculation.php?id_number={id}&rating_period={period}&t=0";
 
+/// Outcome of loading a player's period games.
+pub enum PeriodsFetch {
+    /// All required periods were loaded (cached and/or fetched).
+    Complete {
+        results: Vec<PeriodResult>,
+        /// At least one period's rated games were downloaded from FIDE.
+        downloaded: bool,
+    },
+    /// A required period fetch exhausted retries; nothing was cached for that miss.
+    Incomplete,
+}
+
 pub async fn periods_for_player(
     fide_id: &str,
     periods: &[String],
-) -> Result<Vec<PeriodResult>, Box<dyn Error>> {
-    let cached = load_all_period_results(fide_id, periods).await;
-    let force_refresh = match &cached {
-        Some(results) => results.iter().all(|r| r.games.is_empty()),
-        None => false,
-    };
+    recent_month_games: u32,
+    max_attempts: u32,
+) -> Result<PeriodsFetch, Box<dyn Error>> {
+    let cached = load_cached_period_results(fide_id, periods).await;
+    let missing: Vec<usize> = cached
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.is_none().then_some(i))
+        .collect();
 
-    if force_refresh {
-        return fetch_periods_using_profile(fide_id, periods, true).await;
+    if missing.is_empty() {
+        let results: Vec<PeriodResult> = cached.into_iter().map(Option::unwrap).collect();
+        if results.iter().all(|r| r.games.is_empty()) {
+            return fetch_periods_using_profile(fide_id, periods, true, max_attempts).await;
+        }
+        return Ok(PeriodsFetch::Complete {
+            results,
+            downloaded: false,
+        });
     }
 
-    if let Some(results) = cached {
-        return Ok(results);
+    // Rating-list `Gms` covers the latest period: fill or fetch only that month
+    // when every older period is already cached.
+    if missing.as_slice() == [periods.len().saturating_sub(1)] && !periods.is_empty() {
+        let period = &periods[periods.len() - 1];
+        let path = period_cache_path(fide_id, period);
+        let (latest, downloaded) = if recent_month_games == 0 {
+            (
+                PeriodResult {
+                    fide_id: fide_id.to_string(),
+                    period: period.clone(),
+                    games: Vec::new(),
+                },
+                false,
+            )
+        } else {
+            match fetch_period_until_nonempty(fide_id, period, max_attempts).await {
+                Ok(result) => (result, true),
+                Err(err) if is_retry_limit(&err) => return Ok(PeriodsFetch::Incomplete),
+                Err(err) => return Err(err),
+            }
+        };
+        save_period_result(&path, &latest).await?;
+
+        let mut results: Vec<PeriodResult> = cached
+            .into_iter()
+            .take(periods.len() - 1)
+            .map(|r| r.expect("older periods were cached"))
+            .collect();
+        results.push(latest);
+        return Ok(PeriodsFetch::Complete {
+            results,
+            downloaded,
+        });
     }
 
-    fetch_periods_using_profile(fide_id, periods, false).await
+    fetch_periods_using_profile(fide_id, periods, false, max_attempts).await
 }
 
 async fn fetch_periods_using_profile(
     fide_id: &str,
     periods: &[String],
     force_refresh: bool,
-) -> Result<Vec<PeriodResult>, Box<dyn Error>> {
-    let active = fetch_periods_with_standard_games(fide_id).await?;
+    max_attempts: u32,
+) -> Result<PeriodsFetch, Box<dyn Error>> {
+    let active = match fetch_periods_with_standard_games(fide_id, max_attempts).await {
+        Ok(active) => active,
+        Err(err) if is_retry_limit(&err) => return Ok(PeriodsFetch::Incomplete),
+        Err(err) => return Err(err),
+    };
     let mut results = Vec::with_capacity(periods.len());
+    let mut downloaded = false;
 
     for period in periods {
         let path = period_cache_path(fide_id, period);
@@ -58,7 +121,16 @@ async fn fetch_periods_using_profile(
                 Some(cached) if !cached.games.is_empty() => cached,
                 _ => {
                     remove_period_cache(&path).await;
-                    fetch_period_until_nonempty(fide_id, period).await?
+                    match fetch_period_until_nonempty(fide_id, period, max_attempts).await {
+                        Ok(result) => {
+                            downloaded = true;
+                            result
+                        }
+                        Err(err) if is_retry_limit(&err) => {
+                            return Ok(PeriodsFetch::Incomplete);
+                        }
+                        Err(err) => return Err(err),
+                    }
                 }
             };
 
@@ -75,22 +147,29 @@ async fn fetch_periods_using_profile(
         }
     }
 
-    println!();
-    Ok(results)
+    Ok(PeriodsFetch::Complete {
+        results,
+        downloaded,
+    })
 }
 
 async fn fetch_period_until_nonempty(
     fide_id: &str,
     period: &str,
+    max_attempts: u32,
 ) -> Result<PeriodResult, Box<dyn Error>> {
     let url = CALC_URL
         .replacen("{id}", fide_id, 1)
         .replacen("{period}", period, 1);
-    let html = fetch_text_with_retry(&url, |text| {
-        parse_games(text)
-            .map(|games| !games.is_empty())
-            .unwrap_or(false)
-    })
+    let html = fetch_text_with_retry(
+        &url,
+        max_attempts,
+        |text| {
+            parse_games(text)
+                .map(|games| !games.is_empty())
+                .unwrap_or(false)
+        },
+    )
     .await?;
     Ok(PeriodResult {
         fide_id: fide_id.to_string(),
@@ -102,9 +181,10 @@ async fn fetch_period_until_nonempty(
 /// Periods on the profile page where standard games (STD GMS) > 0.
 async fn fetch_periods_with_standard_games(
     fide_id: &str,
+    max_attempts: u32,
 ) -> Result<HashSet<String>, Box<dyn Error>> {
     let url = PROFILE_CALC_URL.replacen("{id}", fide_id, 1);
-    let html = fetch_text_with_retry(&url, |text| !text.trim().is_empty()).await?;
+    let html = fetch_text_with_retry(&url, max_attempts, |text| !text.trim().is_empty()).await?;
     parse_periods_with_standard_games(&html)
 }
 
