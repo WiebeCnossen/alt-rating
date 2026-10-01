@@ -11,8 +11,8 @@ const TPR_LIST_ANCHOR_RANK: usize = 30;
 /// Include players whose ELO_YEAR is at least this many points below the anchor.
 const TPR_LIST_BAND: i32 = 150;
 
-/// Default tighter band once any player is incomplete, so missing players do not pull the floor down as far.
-pub const TPR_LIST_BAND_INCOMPLETE: i32 = 0;
+/// Default TPR band once any player is incomplete, so missing players do not pull the floor down as far.
+pub const TPR_LIST_BAND_INCOMPLETE: i32 = 150;
 
 pub struct ProcessOutcome {
     pub summaries: Vec<PlayerSummary>,
