@@ -26,6 +26,7 @@ pub struct PeriodResult {
 
 pub struct PlayerSummary {
     pub name: String,
+    pub fide_id: String,
     pub rating: String,
     pub elo_year: i32,
     pub all_games_tpr: i32,

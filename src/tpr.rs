@@ -109,9 +109,15 @@ pub fn tpr_report(
     })
 }
 
-pub fn summary_from_report(name: String, rating: String, report: &TprReport) -> PlayerSummary {
+pub fn summary_from_report(
+    name: String,
+    fide_id: String,
+    rating: String,
+    report: &TprReport,
+) -> PlayerSummary {
     PlayerSummary {
         name,
+        fide_id,
         rating,
         elo_year: report.elo_year,
         all_games_tpr: report.all_games_tpr,

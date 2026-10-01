@@ -144,6 +144,7 @@ pub async fn process_players(
 
         summaries.push(summary_from_report(
             player.name.clone(),
+            player.fide_id.clone(),
             player.rating.clone(),
             &report,
         ));
@@ -261,6 +262,7 @@ mod tests {
     fn summary(name: &str, elo_year: i32) -> PlayerSummary {
         PlayerSummary {
             name: name.into(),
+            fide_id: "0".into(),
             rating: "2500".into(),
             elo_year,
             all_games_tpr: elo_year,
