@@ -1,11 +1,8 @@
 use crate::fide::{PeriodsFetch, periods_for_player};
 use crate::model::{IncompletePlayer, Player, PlayerSummary};
-use crate::tpr::{summary_from_report, tpr_report};
+use crate::tpr::{MIN_GAMES, summary_from_report, tpr_report};
 use chrono::{Datelike, Months, Utc};
 use std::error::Error;
-
-/// Minimum actual games required for a player to appear in the output lists.
-const MIN_GAMES_FOR_LIST: usize = 12;
 
 /// Once the TPR list has this many players, cut off anyone more than
 /// [`TPR_LIST_BAND`] below the player in this position (1-based).
@@ -15,7 +12,7 @@ const TPR_LIST_ANCHOR_RANK: usize = 30;
 const TPR_LIST_BAND: i32 = 150;
 
 /// Tighter band once any player is incomplete, so missing players do not pull the floor down as far.
-const TPR_LIST_BAND_INCOMPLETE: i32 = 50;
+const TPR_LIST_BAND_INCOMPLETE: i32 = 0;
 
 pub struct ProcessOutcome {
     pub summaries: Vec<PlayerSummary>,
@@ -122,7 +119,7 @@ pub async fn process_players(
             println!("{}\tTPR_RAW\t{}", player.name, report.raw_games_tpr);
         }
 
-        if report.total_games < MIN_GAMES_FOR_LIST {
+        if report.total_games < MIN_GAMES {
             continue;
         }
 
@@ -256,7 +253,7 @@ mod tests {
         assert_eq!(tpr_list_floor(&summaries, TPR_LIST_BAND), Some(2550));
         assert_eq!(
             tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE),
-            Some(2650)
+            Some(2700 - TPR_LIST_BAND_INCOMPLETE)
         );
     }
 
@@ -287,7 +284,7 @@ mod tests {
         let summaries: Vec<PlayerSummary> = Vec::new();
         let floor = tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE)
             .or_else(|| anchor_elo_year.map(|a| a - TPR_LIST_BAND_INCOMPLETE));
-        assert_eq!(floor, Some(2650));
+        assert_eq!(floor, Some(2700 - TPR_LIST_BAND_INCOMPLETE));
     }
 
     #[test]
