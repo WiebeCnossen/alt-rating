@@ -11,8 +11,8 @@ const TPR_LIST_ANCHOR_RANK: usize = 30;
 /// Include players whose ELO_YEAR is at least this many points below the anchor.
 const TPR_LIST_BAND: i32 = 150;
 
-/// Tighter band once any player is incomplete, so missing players do not pull the floor down as far.
-const TPR_LIST_BAND_INCOMPLETE: i32 = 0;
+/// Default tighter band once any player is incomplete, so missing players do not pull the floor down as far.
+pub const TPR_LIST_BAND_INCOMPLETE: i32 = 0;
 
 pub struct ProcessOutcome {
     pub summaries: Vec<PlayerSummary>,
@@ -39,6 +39,7 @@ pub async fn process_players(
     periods: &[String],
     max_attempts: u32,
     initial_wait_millis: u64,
+    band_incomplete: i32,
 ) -> Result<ProcessOutcome, Box<dyn Error>> {
     let mut summaries = Vec::new();
     let mut incomplete = Vec::new();
@@ -87,11 +88,11 @@ pub async fn process_players(
                 });
                 // Tighten the scan once the 30th exists; keep summaries so the
                 // list can still grow toward the anchor for cutoff purposes.
-                if let Some(tight_floor) = tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE)
-                    .or_else(|| anchor_elo_year.map(|a| a - TPR_LIST_BAND_INCOMPLETE))
+                if let Some(tight_floor) = tpr_list_floor(&summaries, band_incomplete)
+                    .or_else(|| anchor_elo_year.map(|a| a - band_incomplete))
                 {
                     rating_floor = Some(rating_floor.map_or(tight_floor, |f| f.max(tight_floor)));
-                    retain_within_tpr_band(&mut summaries, TPR_LIST_BAND_INCOMPLETE);
+                    retain_within_tpr_band(&mut summaries, band_incomplete);
                 }
                 continue;
             }
@@ -137,7 +138,7 @@ pub async fn process_players(
         let band = if incomplete.is_empty() {
             TPR_LIST_BAND
         } else {
-            TPR_LIST_BAND_INCOMPLETE
+            band_incomplete
         };
         retain_within_tpr_band(&mut summaries, band);
         rating_floor = tpr_list_floor(&summaries, band);
