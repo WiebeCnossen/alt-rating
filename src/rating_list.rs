@@ -1,4 +1,4 @@
-use crate::cache::save_standard_rating_list;
+use crate::cache::{load_standard_rating_list, save_standard_rating_list};
 use crate::http::fetch_bytes_with_retry;
 use crate::model::Player;
 use chrono::{Datelike, Utc};
@@ -23,18 +23,30 @@ static RATING_LIST_PERIOD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(\d{2})\b").unwrap()
 });
 
-/// Download the standard rating list and return active men and women, highest rating first.
+/// Load the current-month standard rating list from cache, or download it.
 pub async fn fetch_top_players(
     max_attempts: u32,
 ) -> Result<(Vec<Player>, Vec<Player>), Box<dyn Error>> {
+    let today = Utc::now().date_naive();
+    let year = today.year();
+    let month = today.month();
+
+    if let Some(text) = load_standard_rating_list(year, month).await
+        && let Ok((cached_year, cached_month)) = parse_rating_list_period(&text)
+        && cached_year == year
+        && cached_month == month
+    {
+        return parse_top_players_from_rating_list(&text);
+    }
+
     let bytes = fetch_bytes_with_retry(STANDARD_RATING_LIST_URL, max_attempts, |bytes| {
         bytes.starts_with(b"PK")
     })
     .await?;
     let text = rating_list_text_from_zip(&bytes)?;
-    let (year, month) = parse_rating_list_period(&text)?;
-    save_standard_rating_list(year, month, &text).await?;
-    verify_rating_list_is_current_month(year, month)?;
+    let (list_year, list_month) = parse_rating_list_period(&text)?;
+    save_standard_rating_list(list_year, list_month, &text).await?;
+    verify_rating_list_is_current_month(list_year, list_month)?;
     parse_top_players_from_rating_list(&text)
 }
 

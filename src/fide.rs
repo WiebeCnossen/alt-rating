@@ -8,7 +8,7 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::error::Error;
 
-fn is_retry_limit(err: &Box<dyn Error>) -> bool {
+fn is_retry_limit(err: &(dyn Error + 'static)) -> bool {
     err.is::<RetryLimitReached>()
 }
 
@@ -73,7 +73,7 @@ pub async fn periods_for_player(
         } else {
             match fetch_period_until_nonempty(fide_id, period, max_attempts).await {
                 Ok(result) => (result, true),
-                Err(err) if is_retry_limit(&err) => return Ok(PeriodsFetch::Incomplete),
+                Err(err) if is_retry_limit(err.as_ref()) => return Ok(PeriodsFetch::Incomplete),
                 Err(err) => return Err(err),
             }
         };
@@ -102,7 +102,7 @@ async fn fetch_periods_using_profile(
 ) -> Result<PeriodsFetch, Box<dyn Error>> {
     let active = match fetch_periods_with_standard_games(fide_id, max_attempts).await {
         Ok(active) => active,
-        Err(err) if is_retry_limit(&err) => return Ok(PeriodsFetch::Incomplete),
+        Err(err) if is_retry_limit(err.as_ref()) => return Ok(PeriodsFetch::Incomplete),
         Err(err) => return Err(err),
     };
     let mut results = Vec::with_capacity(periods.len());
@@ -126,7 +126,7 @@ async fn fetch_periods_using_profile(
                             downloaded = true;
                             result
                         }
-                        Err(err) if is_retry_limit(&err) => {
+                        Err(err) if is_retry_limit(err.as_ref()) => {
                             return Ok(PeriodsFetch::Incomplete);
                         }
                         Err(err) => return Err(err),

@@ -13,6 +13,11 @@ pub fn standard_rating_list_path(year: i32, month: u32) -> PathBuf {
     PathBuf::from(CACHE_DIR).join(format!("standard-{year:04}-{month:02}.txt"))
 }
 
+pub async fn load_standard_rating_list(year: i32, month: u32) -> Option<String> {
+    let path = standard_rating_list_path(year, month);
+    fs::read_to_string(path).await.ok()
+}
+
 pub async fn save_standard_rating_list(
     year: i32,
     month: u32,

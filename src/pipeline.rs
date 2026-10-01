@@ -81,21 +81,18 @@ pub async fn process_players(
                         name: player.name.clone(),
                         fide_id: player.fide_id.clone(),
                     });
-                    let tight_floor = tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE)
+                    // Tighten the scan once the 30th exists; keep summaries so the
+                    // list can still grow toward the anchor for cutoff purposes.
+                    if let Some(tight_floor) = tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE)
                         .or_else(|| anchor_elo_year.map(|a| a - TPR_LIST_BAND_INCOMPLETE))
-                        .unwrap_or_else(|| {
-                            player.rating.parse::<i32>().unwrap_or(0) - TPR_LIST_BAND_INCOMPLETE
-                        });
-                    rating_floor = Some(rating_floor.map_or(tight_floor, |f| f.max(tight_floor)));
-                    summaries.clear();
+                    {
+                        rating_floor =
+                            Some(rating_floor.map_or(tight_floor, |f| f.max(tight_floor)));
+                        retain_within_tpr_band(&mut summaries, TPR_LIST_BAND_INCOMPLETE);
+                    }
                     continue;
                 }
             };
-
-        // Once anyone is incomplete, keep scanning for more incompletes only.
-        if !incomplete.is_empty() {
-            continue;
-        }
 
         if results.iter().all(|r| r.games.is_empty()) {
             println!(
@@ -109,18 +106,21 @@ pub async fn process_players(
 
         let player_rating: f64 = player.rating.parse()?;
         let report = tpr_report(&results, player_rating)?;
-        for window in &report.windows {
+        let print_outcome = incomplete.is_empty();
+        if print_outcome {
+            for window in &report.windows {
+                println!(
+                    "TPR\t{}\t{}\t{}\t{}",
+                    window.start_period, window.end_period, window.games, window.tpr
+                );
+            }
+            println!("{}\tELO_YEAR\t{}", player.name, report.elo_year);
             println!(
-                "TPR\t{}\t{}\t{}\t{}",
-                window.start_period, window.end_period, window.games, window.tpr
+                "{}\tTPR_ALL\t{}\t{}",
+                player.name, report.all_games_tpr, report.total_games
             );
+            println!("{}\tTPR_RAW\t{}", player.name, report.raw_games_tpr);
         }
-        println!("{}\tELO_YEAR\t{}", player.name, report.elo_year);
-        println!(
-            "{}\tTPR_ALL\t{}\t{}",
-            player.name, report.all_games_tpr, report.total_games
-        );
-        println!("{}\tTPR_RAW\t{}", player.name, report.raw_games_tpr);
 
         if report.total_games < MIN_GAMES_FOR_LIST {
             continue;
@@ -132,9 +132,14 @@ pub async fn process_players(
             &report,
         ));
         sort_summaries_by_tpr(&mut summaries);
-        retain_within_tpr_band(&mut summaries, TPR_LIST_BAND);
-        rating_floor = tpr_list_floor(&summaries, TPR_LIST_BAND);
-        maybe_print_new_anchor(list, &summaries, &mut anchor_elo_year);
+        let band = if incomplete.is_empty() {
+            TPR_LIST_BAND
+        } else {
+            TPR_LIST_BAND_INCOMPLETE
+        };
+        retain_within_tpr_band(&mut summaries, band);
+        rating_floor = tpr_list_floor(&summaries, band);
+        maybe_print_new_anchor(list, &summaries, &mut anchor_elo_year, print_outcome);
     }
 
     if !incomplete.is_empty() {
@@ -165,7 +170,12 @@ fn tpr_list_floor(summaries: &[PlayerSummary], band: i32) -> Option<i32> {
     Some(tpr_list_anchor(summaries)? - band)
 }
 
-fn maybe_print_new_anchor(list: &str, summaries: &[PlayerSummary], previous: &mut Option<i32>) {
+fn maybe_print_new_anchor(
+    list: &str,
+    summaries: &[PlayerSummary],
+    previous: &mut Option<i32>,
+    print: bool,
+) {
     let Some(elo_year) = tpr_list_anchor(summaries) else {
         return;
     };
@@ -173,6 +183,9 @@ fn maybe_print_new_anchor(list: &str, summaries: &[PlayerSummary], previous: &mu
         return;
     }
     *previous = Some(elo_year);
+    if !print {
+        return;
+    }
     let holder = &summaries[TPR_LIST_ANCHOR_RANK - 1];
     println!(
         "ANCHOR\t{}\t{}\t{}\tELO_YEAR\t{}",
@@ -244,6 +257,54 @@ mod tests {
         assert_eq!(
             tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE),
             Some(2650)
+        );
+    }
+
+    #[test]
+    fn no_floor_before_anchor_rank() {
+        let summaries: Vec<_> = (0..29)
+            .map(|i| summary(&format!("p{i}"), 2800 - i))
+            .collect();
+        assert_eq!(tpr_list_floor(&summaries, TPR_LIST_BAND), None);
+        assert_eq!(tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE), None);
+    }
+
+    /// Incomplete before the 30th must not invent a floor from that player's rating.
+    #[test]
+    fn incomplete_floor_requires_anchor() {
+        let summaries: Vec<_> = (0..10)
+            .map(|i| summary(&format!("p{i}"), 2800 - i))
+            .collect();
+        let anchor_elo_year: Option<i32> = None;
+        let floor = tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE)
+            .or_else(|| anchor_elo_year.map(|a| a - TPR_LIST_BAND_INCOMPLETE));
+        assert_eq!(floor, None);
+    }
+
+    #[test]
+    fn incomplete_floor_uses_saved_anchor() {
+        let anchor_elo_year = Some(2700);
+        let summaries: Vec<PlayerSummary> = Vec::new();
+        let floor = tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE)
+            .or_else(|| anchor_elo_year.map(|a| a - TPR_LIST_BAND_INCOMPLETE));
+        assert_eq!(floor, Some(2650));
+    }
+
+    #[test]
+    fn incomplete_band_still_grows_list_toward_anchor() {
+        // With incompletes present we use the tighter band, but summaries are kept
+        // so the list can still reach the 30th for cutoff.
+        let mut summaries: Vec<_> = (0..29)
+            .map(|i| summary(&format!("p{i}"), 2800 - i as i32))
+            .collect();
+        assert_eq!(tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE), None);
+        summaries.push(summary("p29", 2771));
+        sort_summaries_by_tpr(&mut summaries);
+        retain_within_tpr_band(&mut summaries, TPR_LIST_BAND_INCOMPLETE);
+        assert_eq!(summaries.len(), 30);
+        assert_eq!(
+            tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE),
+            Some(2771 - TPR_LIST_BAND_INCOMPLETE)
         );
     }
 }
