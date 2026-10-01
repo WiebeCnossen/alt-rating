@@ -4,6 +4,7 @@ use std::error::Error;
 /// Development coefficient used when checking that |ΔR| < 0.5 at the TPR.
 const RATING_K: f64 = 10.0;
 const TPR_GAME_THRESHOLD: usize = 50;
+const VIRTUAL_RATING_OFFSET: f64 = 0.0;
 
 /// Minimum games for a period set to count toward ELO_YEAR, and for a player
 /// to appear on the output lists.
@@ -125,7 +126,7 @@ fn ratings_for_games(games: &[RatedGame], player_rating: f64) -> SetRatings {
 
     let mut stuffed: Vec<RatedGame> = games.to_vec();
     if stuffed.len() < TPR_GAME_THRESHOLD {
-        let virtual_opp = player_rating - 100.0;
+        let virtual_opp = player_rating - VIRTUAL_RATING_OFFSET;
         while stuffed.len() < TPR_GAME_THRESHOLD {
             stuffed.push((virtual_opp, 0.5));
         }

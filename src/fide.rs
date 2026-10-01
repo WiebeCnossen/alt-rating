@@ -64,8 +64,9 @@ pub async fn periods_for_player(
         });
     }
 
-    // Rating-list `Gms` covers the latest period: fill or fetch only that month
-    // when every older period is already cached.
+    // Rating-list `Gms` is the game count for the current as-of period
+    // (`periods` last entry == current month's `YYYY-MM-01`). Fill or fetch
+    // only that period when every older period is already cached.
     if missing.as_slice() == [periods.len().saturating_sub(1)] && !periods.is_empty() {
         let period = &periods[periods.len() - 1];
         let path = period_cache_path(fide_id, period);

@@ -11,7 +11,7 @@ use clap::Parser;
 use http::DEFAULT_WAIT_MILLIS;
 use output::{print_summary_table, summary_csv_path, write_summary_csv};
 use pipeline::{
-    TPR_LIST_BAND_INCOMPLETE, complete_incomplete_players, last_12_complete_months, process_players,
+    TPR_LIST_BAND_INCOMPLETE, complete_incomplete_players, last_12_rating_periods, process_players,
 };
 use rating_list::fetch_top_players;
 use std::error::Error;
@@ -30,13 +30,17 @@ struct Args {
     /// TPR band below the anchor while incomplete players remain.
     #[arg(long, default_value_t = TPR_LIST_BAND_INCOMPLETE)]
     band_incomplete: i32,
+
+    /// Skip players whose period fetches are incomplete instead of retrying them.
+    #[arg(long)]
+    ignore_incomplete: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     println!("INIT");
-    let periods = last_12_complete_months();
+    let periods = last_12_rating_periods();
     let (men_players, women_players) = fetch_top_players(args.retries, args.wait).await?;
 
     loop {
@@ -47,6 +51,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             args.retries,
             args.wait,
             args.band_incomplete,
+            args.ignore_incomplete,
         )
         .await?;
         let women = process_players(
@@ -56,6 +61,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             args.retries,
             args.wait,
             args.band_incomplete,
+            args.ignore_incomplete,
         )
         .await?;
 

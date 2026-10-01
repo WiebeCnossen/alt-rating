@@ -19,7 +19,12 @@ pub struct ProcessOutcome {
     pub incomplete: Vec<IncompletePlayer>,
 }
 
-pub fn last_12_complete_months() -> Vec<String> {
+/// Last 12 FIDE rating periods ending at the current calendar month.
+///
+/// Period `YYYY-MM-01` means games rated into the ratings list **as of** that
+/// date (not games played during that month). Once the current month's list is
+/// published, that period belongs in the window.
+pub fn last_12_rating_periods() -> Vec<String> {
     let today = Utc::now().date_naive();
     let first_of_this_month =
         chrono::NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
@@ -27,7 +32,7 @@ pub fn last_12_complete_months() -> Vec<String> {
     (0..12)
         .rev()
         .map(|i| {
-            let d = first_of_this_month - Months::new(i + 1);
+            let d = first_of_this_month - Months::new(i);
             format!("{:04}-{:02}-01", d.year(), d.month())
         })
         .collect()
@@ -40,6 +45,7 @@ pub async fn process_players(
     max_attempts: u32,
     initial_wait_millis: u64,
     band_incomplete: i32,
+    ignore_incomplete: bool,
 ) -> Result<ProcessOutcome, Box<dyn Error>> {
     let mut summaries = Vec::new();
     let mut incomplete = Vec::new();
@@ -78,6 +84,13 @@ pub async fn process_players(
                     println!("COMPLETE\t{}\t{}", player.name, player.fide_id);
                 }
                 results
+            }
+            PeriodsFetch::Incomplete if ignore_incomplete => {
+                println!(
+                    "SKIP\t{}\t{}\tincomplete period fetch",
+                    player.name, player.fide_id
+                );
+                continue;
             }
             PeriodsFetch::Incomplete => {
                 println!("INCOMPLETE\t{}\t{}", player.name, player.fide_id);
@@ -257,12 +270,25 @@ mod tests {
     }
 
     #[test]
-    fn last_twelve_complete_months_are_ordered() {
-        let periods = last_12_complete_months();
+    fn last_twelve_rating_periods_end_at_current_month() {
+        let periods = last_12_rating_periods();
         assert_eq!(periods.len(), 12);
         assert!(periods[0].ends_with("-01"));
-        assert_eq!(&periods[0][8..], "01");
         assert!(periods[0] < periods[11]);
+
+        let today = Utc::now().date_naive();
+        let current = format!("{:04}-{:02}-01", today.year(), today.month());
+        assert_eq!(periods.last(), Some(&current));
+
+        let oldest = first_of_this_month_minus(11);
+        assert_eq!(periods.first(), Some(&oldest));
+    }
+
+    fn first_of_this_month_minus(months: u32) -> String {
+        let today = Utc::now().date_naive();
+        let first = chrono::NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+        let d = first - Months::new(months);
+        format!("{:04}-{:02}-01", d.year(), d.month())
     }
 
     #[test]

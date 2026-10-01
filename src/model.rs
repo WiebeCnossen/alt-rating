@@ -19,6 +19,7 @@ pub struct Game {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PeriodResult {
     pub fide_id: String,
+    /// FIDE rating period as `YYYY-MM-01`: games rated into the list as of that date.
     pub period: String,
     pub games: Vec<Game>,
 }
