@@ -91,12 +91,15 @@ pub async fn process_players(
                 }
             };
 
-        if results.iter().all(|r| r.games.is_empty()) {
+        let total_games: usize = results.iter().map(|r| r.games.len()).sum();
+        if total_games < MIN_GAMES {
             println!(
-                "SKIP\t{}\t{}\tno rated games in last {} periods",
+                "SKIP\t{}\t{}\tfewer than {} rated games in last {} periods ({})",
                 player.name,
                 player.fide_id,
-                periods.len()
+                MIN_GAMES,
+                periods.len(),
+                total_games
             );
             continue;
         }
@@ -117,10 +120,6 @@ pub async fn process_players(
                 player.name, report.all_games_tpr, report.total_games
             );
             println!("{}\tTPR_RAW\t{}", player.name, report.raw_games_tpr);
-        }
-
-        if report.total_games < MIN_GAMES {
-            continue;
         }
 
         summaries.push(summary_from_report(

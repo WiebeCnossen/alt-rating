@@ -331,6 +331,12 @@ mod tests {
     }
 
     #[test]
+    fn tpr_report_errors_when_total_games_below_min() {
+        let results = vec![period("2025-09-01", MIN_GAMES - 1, 2400.0, 1.0)];
+        assert!(tpr_report(&results, 2500.0).is_err());
+    }
+
+    #[test]
     fn elo_year_is_min_of_stuffed_and_penalized_raw_when_under_threshold() {
         let results = vec![period("2025-09-01", MIN_GAMES, 2400.0, 1.0)];
         let report = tpr_report(&results, 2500.0).unwrap();
