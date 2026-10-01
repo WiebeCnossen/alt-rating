@@ -8,7 +8,7 @@ const VIRTUAL_RATING_OFFSET: f64 = 0.0;
 
 /// Minimum games for a period set to count toward ELO_YEAR, and for a player
 /// to appear on the output lists.
-pub const MIN_GAMES: usize = 12;
+pub const MIN_GAMES: usize = 20;
 
 pub struct TprWindow {
     pub start_period: String,
