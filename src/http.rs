@@ -1,7 +1,5 @@
 use reqwest::Client;
-use reqwest::header::{
-    ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, REFERER, USER_AGENT,
-};
+use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, REFERER, USER_AGENT};
 use std::error::Error;
 use std::fmt;
 use std::sync::LazyLock;
@@ -50,10 +48,7 @@ pub enum TextFetchKind<'a> {
 fn build_client() -> Result<Client, Box<dyn Error>> {
     let mut headers = HeaderMap::new();
     headers.insert(USER_AGENT, HeaderValue::from_static(CHROME_USER_AGENT));
-    headers.insert(
-        ACCEPT_LANGUAGE,
-        HeaderValue::from_static("en-US,en;q=0.9"),
-    );
+    headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
 
     Ok(Client::builder()
         .default_headers(headers)
@@ -102,11 +97,19 @@ pub async fn fetch_text_with_retry(
         sleep(Duration::from_millis(wait_millis)).await;
         match try_fetch_text(url, kind).await {
             Ok(text) if accept(&text) => return Ok(text),
-            _ => {
-                if wait_millis <= WAIT_DOUBLE_LIMIT_MILLIS {
-                    wait_millis = wait_millis.saturating_mul(2);
-                }
+            Ok(_) => {
+                println!("OK, but empty {url}");
+                return Err(Box::new(RetryLimitReached {
+                    url: url.to_string(),
+                    attempts: max_attempts,
+                }));
             }
+            Err(e) => {
+                println!("Error {e}");
+            }
+        }
+        if wait_millis <= WAIT_DOUBLE_LIMIT_MILLIS {
+            wait_millis = wait_millis.saturating_mul(2);
         }
     }
     Err(Box::new(RetryLimitReached {

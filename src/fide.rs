@@ -186,9 +186,7 @@ async fn fetch_period_until_nonempty(
         &url,
         max_attempts,
         initial_wait_millis,
-        TextFetchKind::Ajax {
-            referer: &referer,
-        },
+        TextFetchKind::Ajax { referer: &referer },
         |text| {
             parse_games(text)
                 .map(|games| !games.is_empty())
