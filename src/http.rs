@@ -1,5 +1,7 @@
 use reqwest::Client;
-use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, REFERER, USER_AGENT};
+use reqwest::header::{
+    ACCEPT, ACCEPT_LANGUAGE, CACHE_CONTROL, HeaderMap, HeaderValue, PRAGMA, REFERER, USER_AGENT,
+};
 use std::error::Error;
 use std::fmt;
 use std::sync::LazyLock;
@@ -58,10 +60,22 @@ fn build_client() -> Result<Client, Box<dyn Error>> {
         .build()?)
 }
 
+fn apply_cache_bust(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    request
+        .header(CACHE_CONTROL, "no-cache")
+        .header(PRAGMA, "no-cache")
+}
+
 fn apply_text_headers(
     request: reqwest::RequestBuilder,
     kind: TextFetchKind<'_>,
+    bust_cache: bool,
 ) -> Result<reqwest::RequestBuilder, Box<dyn Error>> {
+    let request = if bust_cache {
+        apply_cache_bust(request)
+    } else {
+        request
+    };
     match kind {
         TextFetchKind::Document => Ok(request
             .header(
@@ -85,6 +99,7 @@ fn apply_text_headers(
 
 /// Wait, then GET `url`. On transport/HTTP failure or rejected body, double the wait
 /// (until over 5s) and retry up to `max_attempts` times until `accept` returns true.
+/// Retries after an OK-but-rejected body send cache-busting request headers.
 pub async fn fetch_text_with_retry(
     url: &str,
     max_attempts: u32,
@@ -93,12 +108,17 @@ pub async fn fetch_text_with_retry(
     mut accept: impl FnMut(&str) -> bool,
 ) -> Result<String, Box<dyn Error>> {
     let mut wait_millis = initial_wait_millis;
+    let mut bust_cache = false;
     for _ in 0..max_attempts {
         sleep(Duration::from_millis(wait_millis)).await;
-        match try_fetch_text(url, kind).await {
+        match try_fetch_text(url, kind, bust_cache).await {
             Ok(text) if accept(&text) => return Ok(text),
+            Ok(_) if !bust_cache => {
+                println!("Empty {url}");
+                bust_cache = true;
+            }
             Ok(_) => {
-                println!("OK, but empty {url}");
+                println!("Still empty, giving up");
                 return Err(Box::new(RetryLimitReached {
                     url: url.to_string(),
                     attempts: max_attempts,
@@ -118,18 +138,26 @@ pub async fn fetch_text_with_retry(
     }))
 }
 
-async fn try_fetch_text(url: &str, kind: TextFetchKind<'_>) -> Result<String, Box<dyn Error>> {
-    let request = apply_text_headers(CLIENT.get(url), kind)?;
+async fn try_fetch_text(
+    url: &str,
+    kind: TextFetchKind<'_>,
+    bust_cache: bool,
+) -> Result<String, Box<dyn Error>> {
+    let request = apply_text_headers(CLIENT.get(url), kind, bust_cache)?;
     Ok(request.send().await?.error_for_status()?.text().await?)
 }
 
-async fn try_fetch_bytes(url: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    Ok(CLIENT
+async fn try_fetch_bytes(url: &str, bust_cache: bool) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut request = CLIENT
         .get(url)
         .header(ACCEPT, "*/*")
         .header("Sec-Fetch-Dest", "document")
         .header("Sec-Fetch-Mode", "navigate")
-        .header("Sec-Fetch-Site", "none")
+        .header("Sec-Fetch-Site", "none");
+    if bust_cache {
+        request = apply_cache_bust(request);
+    }
+    Ok(request
         .send()
         .await?
         .error_for_status()?
@@ -145,15 +173,18 @@ pub async fn fetch_bytes_with_retry(
     mut accept: impl FnMut(&[u8]) -> bool,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut wait_millis = initial_wait_millis;
+    let mut bust_cache = false;
     for _ in 0..max_attempts {
         sleep(Duration::from_millis(wait_millis)).await;
-        match try_fetch_bytes(url).await {
+        match try_fetch_bytes(url, bust_cache).await {
             Ok(bytes) if accept(&bytes) => return Ok(bytes),
-            _ => {
-                if wait_millis <= WAIT_DOUBLE_LIMIT_MILLIS {
-                    wait_millis = wait_millis.saturating_mul(2);
-                }
+            Ok(_) => {
+                bust_cache = true;
             }
+            Err(_) => {}
+        }
+        if wait_millis <= WAIT_DOUBLE_LIMIT_MILLIS {
+            wait_millis = wait_millis.saturating_mul(2);
         }
     }
     Err(Box::new(RetryLimitReached {
