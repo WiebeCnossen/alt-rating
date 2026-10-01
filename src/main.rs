@@ -11,7 +11,8 @@ use clap::Parser;
 use http::DEFAULT_WAIT_MILLIS;
 use output::{print_summary_table, summary_csv_path, write_summary_csv};
 use pipeline::{
-    TPR_LIST_BAND_INCOMPLETE, complete_incomplete_players, last_12_rating_periods, process_players,
+    TPR_LIST_BAND_INCOMPLETE, complete_incomplete_players, highest_rated, last_12_rating_periods,
+    process_players,
 };
 use rating_list::fetch_top_players;
 use std::error::Error;
@@ -82,6 +83,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         write_summary_csv(summary_csv_path("open"), &men.summaries).await?;
         write_summary_csv(summary_csv_path("women"), &women.summaries).await?;
         println!("INCOMPLETE_REMAINING\t0");
+        report_ignored_highest("open", &men.ignored_incomplete, men.cutoff_rating);
+        report_ignored_highest("women", &women.ignored_incomplete, women.cutoff_rating);
         return Ok(());
+    }
+}
+
+fn report_ignored_highest(
+    list: &str,
+    ignored: &[model::IncompletePlayer],
+    cutoff_rating: Option<i32>,
+) {
+    if let Some(player) = highest_rated(ignored) {
+        let cutoff = cutoff_rating
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "-".into());
+        println!(
+            "IGNORED_INCOMPLETE_HIGHEST\t{list}\t{}\t{}\t{}\tcutoff\t{cutoff}",
+            player.name, player.fide_id, player.rating
+        );
     }
 }

@@ -39,6 +39,7 @@ pub struct PlayerSummary {
 pub struct IncompletePlayer {
     pub name: String,
     pub fide_id: String,
+    pub rating: String,
     pub recent_games: u32,
 }
 

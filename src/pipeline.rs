@@ -17,6 +17,10 @@ pub const TPR_LIST_BAND_INCOMPLETE: i32 = 150;
 pub struct ProcessOutcome {
     pub summaries: Vec<PlayerSummary>,
     pub incomplete: Vec<IncompletePlayer>,
+    /// Incomplete players skipped because `--ignore-incomplete` was set.
+    pub ignored_incomplete: Vec<IncompletePlayer>,
+    /// FIDE rating floor used to stop scanning the list, if reached.
+    pub cutoff_rating: Option<i32>,
 }
 
 /// Last 12 FIDE rating periods ending at the current calendar month.
@@ -49,6 +53,7 @@ pub async fn process_players(
 ) -> Result<ProcessOutcome, Box<dyn Error>> {
     let mut summaries = Vec::new();
     let mut incomplete = Vec::new();
+    let mut ignored_incomplete = Vec::new();
     let mut anchor_elo_year: Option<i32> = None;
     let mut rating_floor: Option<i32> = None;
 
@@ -90,6 +95,12 @@ pub async fn process_players(
                     "SKIP\t{}\t{}\tincomplete period fetch",
                     player.name, player.fide_id
                 );
+                ignored_incomplete.push(IncompletePlayer {
+                    name: player.name.clone(),
+                    fide_id: player.fide_id.clone(),
+                    rating: player.rating.clone(),
+                    recent_games: player.recent_games,
+                });
                 continue;
             }
             PeriodsFetch::Incomplete => {
@@ -97,6 +108,7 @@ pub async fn process_players(
                 incomplete.push(IncompletePlayer {
                     name: player.name.clone(),
                     fide_id: player.fide_id.clone(),
+                    rating: player.rating.clone(),
                     recent_games: player.recent_games,
                 });
                 // Tighten the scan once the 30th exists; keep summaries so the
@@ -166,7 +178,16 @@ pub async fn process_players(
     Ok(ProcessOutcome {
         summaries,
         incomplete,
+        ignored_incomplete,
+        cutoff_rating: rating_floor,
     })
+}
+
+/// Highest FIDE-rated player among `players`, if any.
+pub fn highest_rated(players: &[IncompletePlayer]) -> Option<&IncompletePlayer> {
+    players
+        .iter()
+        .max_by_key(|p| p.rating.parse::<i32>().unwrap_or(0))
 }
 
 /// Retry period fetches for incomplete players until every one is complete.
@@ -269,6 +290,32 @@ mod tests {
             raw_games_tpr: elo_year,
             total_games: 50,
         }
+    }
+
+    fn incomplete(name: &str, rating: &str) -> IncompletePlayer {
+        IncompletePlayer {
+            name: name.into(),
+            fide_id: "0".into(),
+            rating: rating.into(),
+            recent_games: 0,
+        }
+    }
+
+    #[test]
+    fn highest_rated_picks_max_fide_rating() {
+        let players = vec![
+            incomplete("A", "2600"),
+            incomplete("B", "2750"),
+            incomplete("C", "2700"),
+        ];
+        let top = highest_rated(&players).unwrap();
+        assert_eq!(top.name, "B");
+        assert_eq!(top.rating, "2750");
+    }
+
+    #[test]
+    fn highest_rated_empty_is_none() {
+        assert!(highest_rated(&[]).is_none());
     }
 
     #[test]
