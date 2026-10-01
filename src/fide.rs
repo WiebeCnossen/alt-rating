@@ -2,7 +2,7 @@ use crate::cache::{
     load_cached_period_results, load_period_result, period_cache_path, remove_period_cache,
     save_period_result,
 };
-use crate::http::{RetryLimitReached, fetch_text_with_retry};
+use crate::http::{RetryLimitReached, TextFetchKind, fetch_text_with_retry};
 use crate::model::{Game, PeriodResult};
 use regex::Regex;
 use std::collections::HashSet;
@@ -181,11 +181,20 @@ async fn fetch_period_until_nonempty(
     let url = CALC_URL
         .replacen("{id}", fide_id, 1)
         .replacen("{period}", period, 1);
-    let html = fetch_text_with_retry(&url, max_attempts, initial_wait_millis, |text| {
-        parse_games(text)
-            .map(|games| !games.is_empty())
-            .unwrap_or(false)
-    })
+    let referer = PROFILE_CALC_URL.replacen("{id}", fide_id, 1);
+    let html = fetch_text_with_retry(
+        &url,
+        max_attempts,
+        initial_wait_millis,
+        TextFetchKind::Ajax {
+            referer: &referer,
+        },
+        |text| {
+            parse_games(text)
+                .map(|games| !games.is_empty())
+                .unwrap_or(false)
+        },
+    )
     .await?;
     Ok(PeriodResult {
         fide_id: fide_id.to_string(),
@@ -201,9 +210,13 @@ async fn fetch_periods_with_standard_games(
     initial_wait_millis: u64,
 ) -> Result<HashSet<String>, Box<dyn Error>> {
     let url = PROFILE_CALC_URL.replacen("{id}", fide_id, 1);
-    let html = fetch_text_with_retry(&url, max_attempts, initial_wait_millis, |text| {
-        !text.trim().is_empty()
-    })
+    let html = fetch_text_with_retry(
+        &url,
+        max_attempts,
+        initial_wait_millis,
+        TextFetchKind::Document,
+        |text| !text.trim().is_empty(),
+    )
     .await?;
     parse_periods_with_standard_games(&html)
 }
