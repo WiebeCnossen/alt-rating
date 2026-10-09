@@ -1,6 +1,8 @@
 use crate::bonus::Top30ByMonth;
+use crate::cache::player_gms_sum;
 use crate::fide::{PeriodsFetch, periods_for_player};
 use crate::model::{IncompletePlayer, Player, PlayerSummary};
+use crate::rating_list::parse_period;
 use crate::tpr::{MIN_GAMES, summary_from_report, tpr_report};
 use chrono::{Datelike, Months, Utc};
 use std::error::Error;
@@ -92,6 +94,19 @@ pub async fn process_players(
         }
 
         println!("{}\t{}\t{}", player.name, player.fide_id, player.rating);
+
+        let listed_games = listed_games_in_periods(&player.fide_id, periods)?;
+        if (listed_games as usize) < MIN_GAMES {
+            println!(
+                "SKIP\t{}\t{}\tfewer than {} rated games on rating lists in last {} periods ({})",
+                player.name,
+                player.fide_id,
+                MIN_GAMES,
+                periods.len(),
+                listed_games
+            );
+            continue;
+        }
 
         let results =
             match periods_for_player(&player.fide_id, periods, max_attempts, initial_wait_millis)
@@ -242,6 +257,17 @@ fn sort_summaries_by_tpr(summaries: &mut [PlayerSummary]) {
             .cmp(&a.elo_year)
             .then_with(|| b.all_games_tpr.cmp(&a.all_games_tpr))
     });
+}
+
+/// Sum of rating-list `Gms` for `fide_id` across `periods` (`YYYY-MM-01`).
+fn listed_games_in_periods(fide_id: &str, periods: &[String]) -> Result<u32, Box<dyn Error>> {
+    let months: Vec<(i32, u32)> = periods
+        .iter()
+        .map(|p| parse_period(p))
+        .collect::<Result<_, _>>()?;
+    player_gms_sum(fide_id, &months).ok_or_else(|| {
+        format!("rating list Gms unavailable for {fide_id} over requested periods").into()
+    })
 }
 
 /// ELO_YEAR at the anchor rank, if the list is long enough.

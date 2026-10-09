@@ -239,6 +239,15 @@ impl CacheDb {
         Some(gms as u32)
     }
 
+    /// Sum of `Gms` across months; `None` if any month's list is missing.
+    pub fn player_gms_sum(&self, fide_id: &str, months: &[(i32, u32)]) -> Option<u32> {
+        let mut total = 0u32;
+        for &(year, month) in months {
+            total = total.saturating_add(self.player_gms(fide_id, year, month)?);
+        }
+        Some(total)
+    }
+
     pub fn save_rating_list_players(
         &self,
         year: i32,
@@ -342,6 +351,11 @@ pub fn save_rating_list_players(
 /// `None` if the month is not cached; `Some(0)` if the player is absent.
 pub fn player_gms(fide_id: &str, year: i32, month: u32) -> Option<u32> {
     with_cache_opt(|db| db.player_gms(fide_id, year, month))
+}
+
+/// Sum of `Gms` across months; `None` if any month's list is missing.
+pub fn player_gms_sum(fide_id: &str, months: &[(i32, u32)]) -> Option<u32> {
+    with_cache_opt(|db| db.player_gms_sum(fide_id, months))
 }
 
 #[cfg(test)]
@@ -452,6 +466,21 @@ mod tests {
         assert_eq!(db.player_gms("1", 2026, 10), Some(9));
         assert_eq!(db.player_gms("missing", 2026, 10), Some(0));
         assert_eq!(db.player_gms("1", 2026, 9), None);
+
+        db.save_rating_list_players(
+            2026,
+            9,
+            &[CompactPlayer {
+                fide_id: "1".into(),
+                name: "High".into(),
+                sex: 'M',
+                rating: 2800,
+                gms: 4,
+            }],
+        )
+        .unwrap();
+        assert_eq!(db.player_gms_sum("1", &[(2026, 9), (2026, 10)]), Some(13));
+        assert_eq!(db.player_gms_sum("1", &[(2026, 8), (2026, 10)]), None);
     }
 
     #[test]
