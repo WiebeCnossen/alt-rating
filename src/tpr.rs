@@ -1,3 +1,4 @@
+use crate::bonus::{Top30ByMonth, year_win_bonus};
 use crate::model::{PeriodResult, PlayerSummary};
 use std::error::Error;
 
@@ -19,7 +20,12 @@ pub struct TprWindow {
 
 pub struct TprReport {
     pub windows: Vec<TprWindow>,
+    /// Max period ELO_YEAR plus rounded top-30 win bonuses for the year.
     pub elo_year: i32,
+    /// Max ELO_YEAR across qualifying period sets (before bonuses).
+    pub elo_year_periods: i32,
+    /// Sum of top-30 win bonuses over the year (before rounding into `elo_year`).
+    pub bonus_sum: f64,
     pub all_games_tpr: i32,
     pub raw_games_tpr: i32,
     pub total_games: usize,
@@ -44,6 +50,7 @@ struct SetRatings {
 pub fn tpr_report(
     results: &[PeriodResult],
     player_rating: f64,
+    top30: &Top30ByMonth,
 ) -> Result<TprReport, Box<dyn Error>> {
     let period_games: Vec<PeriodGameList> = results
         .iter()
@@ -73,11 +80,14 @@ pub fn tpr_report(
         .map(|window| ratings_for_games(&window.games, player_rating))
         .collect();
 
-    let elo_year = set_ratings
+    let elo_year_periods = set_ratings
         .iter()
         .map(|r| r.elo_year)
         .max()
         .ok_or("no period sets")?;
+
+    let bonus_sum = year_win_bonus(results, top30)?;
+    let elo_year = elo_year_periods + bonus_sum.round() as i32;
 
     // Longest set by period span; that span is the whole active year
     // (first non-empty period through last non-empty period).
@@ -103,6 +113,8 @@ pub fn tpr_report(
     Ok(TprReport {
         windows,
         elo_year,
+        elo_year_periods,
+        bonus_sum,
         all_games_tpr: longest.all_games_tpr,
         raw_games_tpr: longest.raw_games_tpr,
         total_games,
@@ -238,7 +250,12 @@ fn tournament_performance_rating(games: &[RatedGame]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bonus::Top30ByMonth;
     use crate::model::Game;
+
+    fn empty_top30() -> Top30ByMonth {
+        Top30ByMonth::default()
+    }
 
     fn period(period: &str, n: usize, opp: f64, score: f64) -> PeriodResult {
         PeriodResult {
@@ -247,6 +264,7 @@ mod tests {
             games: (0..n)
                 .map(|_| Game {
                     color: "white".into(),
+                    opponent_name: "Opp".into(),
                     opponent_rating: opp.to_string(),
                     result: format!("{score:.2}"),
                 })
@@ -340,18 +358,22 @@ mod tests {
     #[test]
     fn tpr_report_errors_when_total_games_below_min() {
         let results = vec![period("2025-09-01", MIN_GAMES - 1, 2400.0, 1.0)];
-        assert!(tpr_report(&results, 2500.0).is_err());
+        assert!(tpr_report(&results, 2500.0, &empty_top30()).is_err());
     }
 
     #[test]
     fn elo_year_is_min_of_stuffed_and_penalized_raw_when_under_threshold() {
         let results = vec![period("2025-09-01", MIN_GAMES, 2400.0, 1.0)];
-        let report = tpr_report(&results, 2500.0).unwrap();
+        let report = tpr_report(&results, 2500.0, &empty_top30()).unwrap();
         assert_eq!(report.windows.len(), 1);
         assert_eq!(report.windows[0].games, MIN_GAMES);
         let games_short = (TPR_GAME_THRESHOLD - MIN_GAMES) as i32;
         let penalized_raw = report.raw_games_tpr - 2 * games_short;
-        assert_eq!(report.elo_year, report.all_games_tpr.min(penalized_raw));
+        assert_eq!(
+            report.elo_year_periods,
+            report.all_games_tpr.min(penalized_raw)
+        );
+        assert_eq!(report.elo_year, report.elo_year_periods);
         assert_ne!(report.all_games_tpr, report.raw_games_tpr);
     }
 
@@ -363,7 +385,7 @@ mod tests {
             period("2025-01-01", 40, 2800.0, 1.0),
             period("2025-02-01", 40, 2000.0, 0.0),
         ];
-        let report = tpr_report(&results, 2500.0).unwrap();
+        let report = tpr_report(&results, 2500.0, &empty_top30()).unwrap();
         assert_eq!(report.total_games, 80);
         assert_eq!(report.windows.len(), 3);
 
@@ -380,11 +402,12 @@ mod tests {
         assert_eq!(report.all_games_tpr, full.all_games_tpr);
         assert_eq!(report.raw_games_tpr, full.raw_games_tpr);
         assert_eq!(
-            report.elo_year,
+            report.elo_year_periods,
             full.elo_year
                 .max(first_only.elo_year)
                 .max(second_only.elo_year)
         );
+        assert_eq!(report.elo_year, report.elo_year_periods);
     }
 
     #[test]
@@ -394,7 +417,7 @@ mod tests {
             period("2025-01-01", n, 2700.0, 1.0),
             period("2025-02-01", n, 2000.0, 0.0),
         ];
-        let report = tpr_report(&results, 2500.0).unwrap();
+        let report = tpr_report(&results, 2500.0, &empty_top30()).unwrap();
         let first_games = vec![(2700.0, 1.0); n];
         let first = ratings_for_games(&first_games, 2500.0);
         let games_short = (TPR_GAME_THRESHOLD - n) as i32;
@@ -405,7 +428,7 @@ mod tests {
                 .min(first.raw_games_tpr - 2 * games_short)
         );
         assert_eq!(
-            report.elo_year,
+            report.elo_year_periods,
             report.windows.iter().map(|w| w.tpr).max().unwrap()
         );
         assert!(
@@ -422,5 +445,47 @@ mod tests {
         let full = ratings_for_games(&full_games, 2500.0);
         assert_eq!(report.all_games_tpr, full.all_games_tpr);
         assert_eq!(report.raw_games_tpr, full.raw_games_tpr);
+    }
+
+    #[test]
+    fn elo_year_adds_rounded_year_bonuses_to_max_period() {
+        use crate::bonus::{bonus_for_rank, build_top30_month};
+        use crate::model::CompactPlayer;
+        use crate::rating_list::period_minus_months;
+        use std::collections::HashMap;
+
+        let list_month = "2026-06-01";
+        let mut players = Vec::new();
+        for i in 0..30u32 {
+            players.push(CompactPlayer {
+                fide_id: format!("{i}"),
+                name: format!("Player, {i}"),
+                sex: 'M',
+                rating: 2800 - i,
+                gms: 2,
+            });
+        }
+        let mut lists = HashMap::new();
+        for offset in 0..12u32 {
+            let p = period_minus_months(list_month, offset).unwrap();
+            lists.insert(p, players.clone());
+        }
+        let month = build_top30_month(list_month, 'M', &lists).unwrap();
+        let mut top30 = Top30ByMonth::default();
+        top30.insert(list_month.into(), month);
+
+        let mut results = vec![period("2026-07-01", MIN_GAMES, 2400.0, 0.5)];
+        results[0].games[0] = Game {
+            color: "white".into(),
+            opponent_name: "Player, 0".into(),
+            opponent_rating: "2800".into(),
+            result: "1.00".into(),
+        };
+        let report = tpr_report(&results, 2500.0, &top30).unwrap();
+        assert!((report.bonus_sum - bonus_for_rank(1)).abs() < 1e-9);
+        assert_eq!(
+            report.elo_year,
+            report.elo_year_periods + report.bonus_sum.round() as i32
+        );
     }
 }

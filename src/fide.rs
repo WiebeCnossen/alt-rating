@@ -1,18 +1,15 @@
-use crate::cache::{
-    load_cached_period_results, load_period_result, period_cache_path, remove_period_cache,
-    save_period_result,
-};
+use crate::cache::{load_period_result, player_gms, remove_period_result, save_period_result};
 use crate::http::{RetryLimitReached, TextFetchKind, fetch_text_with_retry};
 use crate::model::{Game, PeriodResult};
+use crate::rating_list::parse_period;
 use regex::Regex;
-use std::collections::HashSet;
 use std::error::Error;
 
 fn is_retry_limit(err: &(dyn Error + 'static)) -> bool {
     err.is::<RetryLimitReached>()
 }
 
-/// Profile calculations tab lists periods and game counts.
+/// Used only as the AJAX referer for the period calculation endpoint.
 const PROFILE_CALC_URL: &str = "https://ratings.fide.com/profile/{id}/calculations";
 
 /// Calculations page loads game rows via AJAX from this endpoint
@@ -32,139 +29,58 @@ pub enum PeriodsFetch {
     Incomplete,
 }
 
+/// Load period games for `fide_id`, using rating-list `Gms` as the expected
+/// game count per period (no profile `/calculations` round-trip).
 pub async fn periods_for_player(
     fide_id: &str,
     periods: &[String],
-    recent_month_games: u32,
     max_attempts: u32,
     initial_wait_millis: u64,
 ) -> Result<PeriodsFetch, Box<dyn Error>> {
-    let cached = load_cached_period_results(fide_id, periods).await;
-    let missing: Vec<usize> = cached
+    let expected: Vec<u32> = periods
         .iter()
-        .enumerate()
-        .filter_map(|(i, r)| r.is_none().then_some(i))
-        .collect();
+        .map(|period| expected_gms_from_rating_list(fide_id, period))
+        .collect::<Result<_, _>>()?;
 
-    if missing.is_empty() {
-        let results: Vec<PeriodResult> = cached.into_iter().map(Option::unwrap).collect();
-        if results.iter().all(|r| r.games.is_empty()) {
-            return fetch_periods_using_profile(
+    let mut results = Vec::with_capacity(periods.len());
+    let mut downloaded = false;
+
+    for (period, &expected_gms) in periods.iter().zip(expected.iter()) {
+        if let Some(cached) = load_period_result(fide_id, period) {
+            if cached.games.len() as u32 == expected_gms {
+                results.push(cached);
+                continue;
+            }
+            let _ = remove_period_result(fide_id, period);
+        }
+
+        let result = if expected_gms == 0 {
+            PeriodResult {
+                fide_id: fide_id.to_string(),
+                period: period.clone(),
+                games: Vec::new(),
+            }
+        } else {
+            match fetch_period_with_game_count(
                 fide_id,
-                periods,
-                true,
+                period,
+                expected_gms,
                 max_attempts,
                 initial_wait_millis,
             )
-            .await;
-        }
-        return Ok(PeriodsFetch::Complete {
-            results,
-            downloaded: false,
-        });
-    }
-
-    // Rating-list `Gms` is the game count for the current as-of period
-    // (`periods` last entry == current month's `YYYY-MM-01`). Fill or fetch
-    // only that period when every older period is already cached.
-    if missing.as_slice() == [periods.len().saturating_sub(1)] && !periods.is_empty() {
-        let period = &periods[periods.len() - 1];
-        let path = period_cache_path(fide_id, period);
-        let (latest, downloaded) = if recent_month_games == 0 {
-            (
-                PeriodResult {
-                    fide_id: fide_id.to_string(),
-                    period: period.clone(),
-                    games: Vec::new(),
-                },
-                false,
-            )
-        } else {
-            match fetch_period_until_nonempty(fide_id, period, max_attempts, initial_wait_millis)
-                .await
+            .await
             {
-                Ok(result) => (result, true),
+                Ok(result) => {
+                    downloaded = true;
+                    result
+                }
                 Err(err) if is_retry_limit(err.as_ref()) => return Ok(PeriodsFetch::Incomplete),
                 Err(err) => return Err(err),
             }
         };
-        save_period_result(&path, &latest).await?;
 
-        let mut results: Vec<PeriodResult> = cached
-            .into_iter()
-            .take(periods.len() - 1)
-            .map(|r| r.expect("older periods were cached"))
-            .collect();
-        results.push(latest);
-        return Ok(PeriodsFetch::Complete {
-            results,
-            downloaded,
-        });
-    }
-
-    fetch_periods_using_profile(fide_id, periods, false, max_attempts, initial_wait_millis).await
-}
-
-async fn fetch_periods_using_profile(
-    fide_id: &str,
-    periods: &[String],
-    force_refresh: bool,
-    max_attempts: u32,
-    initial_wait_millis: u64,
-) -> Result<PeriodsFetch, Box<dyn Error>> {
-    let active =
-        match fetch_periods_with_standard_games(fide_id, max_attempts, initial_wait_millis).await {
-            Ok(active) => active,
-            Err(err) if is_retry_limit(err.as_ref()) => return Ok(PeriodsFetch::Incomplete),
-            Err(err) => return Err(err),
-        };
-    let mut results = Vec::with_capacity(periods.len());
-    let mut downloaded = false;
-
-    for period in periods {
-        let path = period_cache_path(fide_id, period);
-        if active.contains(period) {
-            let cached = if force_refresh {
-                None
-            } else {
-                load_period_result(&path, fide_id, period).await
-            };
-
-            let result = match cached {
-                Some(cached) if !cached.games.is_empty() => cached,
-                _ => {
-                    remove_period_cache(&path).await;
-                    match fetch_period_until_nonempty(
-                        fide_id,
-                        period,
-                        max_attempts,
-                        initial_wait_millis,
-                    )
-                    .await
-                    {
-                        Ok(result) => {
-                            downloaded = true;
-                            result
-                        }
-                        Err(err) if is_retry_limit(err.as_ref()) => {
-                            return Ok(PeriodsFetch::Incomplete);
-                        }
-                        Err(err) => return Err(err),
-                    }
-                }
-            };
-
-            save_period_result(&path, &result).await?;
-            results.push(result);
-        } else {
-            let result = PeriodResult {
-                fide_id: fide_id.to_string(),
-                period: period.clone(),
-                games: Vec::new(),
-            };
-            save_period_result(&path, &result).await?;
-            results.push(result);
-        }
+        save_period_result(&result)?;
+        results.push(result);
     }
 
     Ok(PeriodsFetch::Complete {
@@ -173,9 +89,17 @@ async fn fetch_periods_using_profile(
     })
 }
 
-async fn fetch_period_until_nonempty(
+fn expected_gms_from_rating_list(fide_id: &str, period: &str) -> Result<u32, Box<dyn Error>> {
+    let (year, month) = parse_period(period)?;
+    player_gms(fide_id, year, month).ok_or_else(|| {
+        format!("rating list {year:04}-{month:02} not in cache (needed for {fide_id} Gms)").into()
+    })
+}
+
+async fn fetch_period_with_game_count(
     fide_id: &str,
     period: &str,
+    expected_games: u32,
     max_attempts: u32,
     initial_wait_millis: u64,
 ) -> Result<PeriodResult, Box<dyn Error>> {
@@ -190,85 +114,39 @@ async fn fetch_period_until_nonempty(
         TextFetchKind::Ajax { referer: &referer },
         |text| {
             parse_games(text)
-                .map(|games| !games.is_empty())
+                .map(|games| games.len() as u32 == expected_games)
                 .unwrap_or(false)
         },
     )
     .await?;
+    let games = parse_games(&html)?;
+    if games.len() as u32 != expected_games {
+        return Err(format!(
+            "period {period} for {fide_id}: expected {expected_games} games, got {}",
+            games.len()
+        )
+        .into());
+    }
     Ok(PeriodResult {
         fide_id: fide_id.to_string(),
         period: period.to_string(),
-        games: parse_games(&html)?,
-    })
-}
-
-/// Periods on the profile page where standard games (STD GMS) > 0.
-async fn fetch_periods_with_standard_games(
-    fide_id: &str,
-    max_attempts: u32,
-    initial_wait_millis: u64,
-) -> Result<HashSet<String>, Box<dyn Error>> {
-    let url = PROFILE_CALC_URL.replacen("{id}", fide_id, 1);
-    let html = fetch_text_with_retry(
-        &url,
-        max_attempts,
-        initial_wait_millis,
-        TextFetchKind::Document,
-        |text| !text.trim().is_empty(),
-    )
-    .await?;
-    parse_periods_with_standard_games(&html)
-}
-
-fn parse_periods_with_standard_games(html: &str) -> Result<HashSet<String>, Box<dyn Error>> {
-    // Period | STD rating | STD GMS | …
-    let re = Regex::new(
-        r#"(?s)<td width=75 align=right>&nbsp;(\d{4})-([A-Za-z]{3})&nbsp;</td>\s*<td[^>]*>&nbsp;\d+&nbsp;</td>\s*<td[^>]*>&nbsp;(\d+)&nbsp;</td>"#,
-    )?;
-
-    let mut periods = HashSet::new();
-    for caps in re.captures_iter(html) {
-        let std_games: u32 = caps[3].parse()?;
-        if std_games == 0 {
-            continue;
-        }
-        let month = month_abbrev_to_number(&caps[2])
-            .ok_or_else(|| format!("unknown month abbreviation on profile page: {}", &caps[2]))?;
-        periods.insert(format!("{:04}-{:02}-01", caps[1].parse::<i32>()?, month));
-    }
-    Ok(periods)
-}
-
-fn month_abbrev_to_number(abbrev: &str) -> Option<u32> {
-    Some(match &abbrev.to_ascii_lowercase()[..] {
-        "jan" => 1,
-        "feb" => 2,
-        "mar" => 3,
-        "apr" => 4,
-        "may" => 5,
-        "jun" => 6,
-        "jul" => 7,
-        "aug" => 8,
-        "sep" => 9,
-        "oct" => 10,
-        "nov" => 11,
-        "dec" => 12,
-        _ => return None,
+        games,
     })
 }
 
 pub fn parse_games(html: &str) -> Result<Vec<Game>, Box<dyn Error>> {
-    // Game rows: color note, then rating cell (may include a "*" marker), fed, result.
+    // Game rows: color note + name, then rating cell (may include a "*" marker), fed, result.
     let re = Regex::new(
-        r#"(?s)<span class="(white|black)_note">.*?</span>.*?<td\s+class="list4">(\d+)\b.*?</td>\s*<td\s+class="list4 table_scale">[A-Z]{3}</td>\s*<td\s+class=list4>(\d+\.\d+)</td>"#,
+        r#"(?s)<span class="(white|black)_note">.*?</span>\s*([^<]+?)\s*</td>.*?<td\s+class="list4">(\d+)\b.*?</td>\s*<td\s+class="list4 table_scale">[A-Z]{3}</td>\s*<td\s+class=list4>(\d+\.\d+)</td>"#,
     )?;
 
     Ok(re
         .captures_iter(html)
         .map(|caps| Game {
             color: caps[1].to_string(),
-            opponent_rating: caps[2].to_string(),
-            result: caps[3].to_string(),
+            opponent_name: caps[2].trim().to_string(),
+            opponent_rating: caps[3].to_string(),
+            result: caps[4].to_string(),
         })
         .collect())
 }
@@ -301,9 +179,11 @@ mod tests {
         let games = parse_games(html).unwrap();
         assert_eq!(games.len(), 2);
         assert_eq!(games[0].color, "black");
+        assert_eq!(games[0].opponent_name, "Firouzja, Alireza");
         assert_eq!(games[0].opponent_rating, "2759");
         assert_eq!(games[0].result, "0.00");
         assert_eq!(games[1].color, "white");
+        assert_eq!(games[1].opponent_name, "Keymer, Vincent");
         assert_eq!(games[1].result, "0.50");
     }
 
@@ -327,27 +207,11 @@ mod tests {
         let games = parse_games(html).unwrap();
         assert_eq!(games.len(), 2);
         assert_eq!(games[0].color, "black");
+        assert_eq!(games[0].opponent_name, "Costanza, Mitchell");
         assert_eq!(games[0].opponent_rating, "2407");
         assert_eq!(games[0].result, "1.00");
         assert_eq!(games[1].color, "white");
+        assert_eq!(games[1].opponent_name, "Villamil, Nahum Jose");
         assert_eq!(games[1].opponent_rating, "2407");
-    }
-
-    #[test]
-    fn parses_profile_periods_with_standard_games() {
-        let html = r#"
-			<td width=75 align=right>&nbsp;2026-Sep&nbsp;</td>
-			<td valign=top width=40 align=right>&nbsp;2823&nbsp;</td>
-			<td valign=top width=30 align=right>&nbsp;0&nbsp;</td>
-			<td width=75 align=right>&nbsp;2026-Jul&nbsp;</td>
-			<td valign=top width=40 align=right>&nbsp;2823&nbsp;</td>
-			<td valign=top width=30 align=right>&nbsp;10&nbsp;</td>
-			<td width=75 align=right>&nbsp;2025-Dec&nbsp;</td>
-			<td valign=top width=40 align=right>&nbsp;2840&nbsp;</td>
-			<td valign=top width=30 align=right>&nbsp;1&nbsp;</td>"#;
-        let periods = parse_periods_with_standard_games(html).unwrap();
-        assert!(periods.contains("2026-07-01"));
-        assert!(periods.contains("2025-12-01"));
-        assert!(!periods.contains("2026-09-01"));
     }
 }

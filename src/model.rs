@@ -1,22 +1,31 @@
-use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct Player {
     pub fide_id: String,
     pub name: String,
     pub rating: String,
-    /// Games in the most recent rating-list month (`Gms` column).
-    pub recent_games: u32,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+/// Compact rating-list row used for historical top-30 / activity lookups.
+#[derive(Clone, Debug)]
+pub struct CompactPlayer {
+    pub fide_id: String,
+    pub name: String,
+    /// `M` or `F`.
+    pub sex: char,
+    pub rating: u32,
+    pub gms: u32,
+}
+
+#[derive(Clone, Debug)]
 pub struct Game {
     pub color: String,
+    /// Opponent display name as shown on the FIDE calculations page.
+    pub opponent_name: String,
     pub opponent_rating: String,
     pub result: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct PeriodResult {
     pub fide_id: String,
     /// FIDE rating period as `YYYY-MM-01`: games rated into the list as of that date.
@@ -40,7 +49,6 @@ pub struct IncompletePlayer {
     pub name: String,
     pub fide_id: String,
     pub rating: String,
-    pub recent_games: u32,
 }
 
 impl PlayerSummary {

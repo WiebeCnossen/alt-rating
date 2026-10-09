@@ -1,3 +1,4 @@
+use crate::bonus::Top30ByMonth;
 use crate::fide::{PeriodsFetch, periods_for_player};
 use crate::model::{IncompletePlayer, Player, PlayerSummary};
 use crate::tpr::{MIN_GAMES, summary_from_report, tpr_report};
@@ -14,6 +15,12 @@ const TPR_LIST_BAND: i32 = 150;
 /// Default TPR band once any player is incomplete, so missing players do not pull the floor down as far.
 pub const TPR_LIST_BAND_INCOMPLETE: i32 = 150;
 
+/// Assumed anchor ELO_YEAR for the open list before the 30th place exists.
+const PROVISIONAL_ANCHOR_OPEN: i32 = 2750;
+
+/// Assumed anchor ELO_YEAR for the women's list before the 30th place exists.
+const PROVISIONAL_ANCHOR_WOMEN: i32 = 2500;
+
 pub struct ProcessOutcome {
     pub summaries: Vec<PlayerSummary>,
     pub incomplete: Vec<IncompletePlayer>,
@@ -21,6 +28,17 @@ pub struct ProcessOutcome {
     pub ignored_incomplete: Vec<IncompletePlayer>,
     /// FIDE rating floor used to stop scanning the list, if reached.
     pub cutoff_rating: Option<i32>,
+}
+
+pub struct ProcessPlayersArgs<'a> {
+    pub list: &'a str,
+    pub players: &'a [Player],
+    pub periods: &'a [String],
+    pub top30: &'a Top30ByMonth,
+    pub max_attempts: u32,
+    pub initial_wait_millis: u64,
+    pub band_incomplete: i32,
+    pub ignore_incomplete: bool,
 }
 
 /// Last 12 FIDE rating periods ending at the current calendar month.
@@ -43,85 +61,79 @@ pub fn last_12_rating_periods() -> Vec<String> {
 }
 
 pub async fn process_players(
-    list: &str,
-    players: &[Player],
-    periods: &[String],
-    max_attempts: u32,
-    initial_wait_millis: u64,
-    band_incomplete: i32,
-    ignore_incomplete: bool,
+    args: ProcessPlayersArgs<'_>,
 ) -> Result<ProcessOutcome, Box<dyn Error>> {
+    let ProcessPlayersArgs {
+        list,
+        players,
+        periods,
+        top30,
+        max_attempts,
+        initial_wait_millis,
+        band_incomplete,
+        ignore_incomplete,
+    } = args;
+
     let mut summaries = Vec::new();
     let mut incomplete = Vec::new();
     let mut ignored_incomplete = Vec::new();
     let mut anchor_elo_year: Option<i32> = None;
-    let mut rating_floor: Option<i32> = None;
+    let mut rating_floor = tpr_list_floor(&summaries, TPR_LIST_BAND, list, anchor_elo_year);
 
     println!("LIST\t{list}\t{}", players.len());
     for player in players {
-        if let Some(floor) = rating_floor {
-            let rating = player.rating.parse::<i32>().unwrap_or(0);
-            if rating < floor {
-                println!(
-                    "STOP\t{}\trating {} below ELO_YEAR floor {}",
-                    list, player.rating, floor
-                );
-                break;
-            }
+        let rating = player.rating.parse::<i32>().unwrap_or(0);
+        if rating < rating_floor {
+            println!(
+                "STOP\t{}\trating {} below ELO_YEAR floor {}",
+                list, player.rating, rating_floor
+            );
+            break;
         }
 
         println!("{}\t{}\t{}", player.name, player.fide_id, player.rating);
 
-        let results = match periods_for_player(
-            &player.fide_id,
-            periods,
-            player.recent_games,
-            max_attempts,
-            initial_wait_millis,
-        )
-        .await?
-        {
-            PeriodsFetch::Complete {
-                results,
-                downloaded,
-            } => {
-                if downloaded {
-                    println!("COMPLETE\t{}\t{}", player.name, player.fide_id);
+        let results =
+            match periods_for_player(&player.fide_id, periods, max_attempts, initial_wait_millis)
+                .await?
+            {
+                PeriodsFetch::Complete {
+                    results,
+                    downloaded,
+                } => {
+                    if downloaded {
+                        println!("COMPLETE\t{}\t{}", player.name, player.fide_id);
+                    }
+                    results
                 }
-                results
-            }
-            PeriodsFetch::Incomplete if ignore_incomplete => {
-                println!(
-                    "SKIP\t{}\t{}\tincomplete period fetch",
-                    player.name, player.fide_id
-                );
-                ignored_incomplete.push(IncompletePlayer {
-                    name: player.name.clone(),
-                    fide_id: player.fide_id.clone(),
-                    rating: player.rating.clone(),
-                    recent_games: player.recent_games,
-                });
-                continue;
-            }
-            PeriodsFetch::Incomplete => {
-                println!("INCOMPLETE\t{}\t{}", player.name, player.fide_id);
-                incomplete.push(IncompletePlayer {
-                    name: player.name.clone(),
-                    fide_id: player.fide_id.clone(),
-                    rating: player.rating.clone(),
-                    recent_games: player.recent_games,
-                });
-                // Tighten the scan once the 30th exists; keep summaries so the
-                // list can still grow toward the anchor for cutoff purposes.
-                if let Some(tight_floor) = tpr_list_floor(&summaries, band_incomplete)
-                    .or_else(|| anchor_elo_year.map(|a| a - band_incomplete))
-                {
-                    rating_floor = Some(rating_floor.map_or(tight_floor, |f| f.max(tight_floor)));
-                    retain_within_tpr_band(&mut summaries, band_incomplete);
+                PeriodsFetch::Incomplete if ignore_incomplete => {
+                    println!(
+                        "SKIP\t{}\t{}\tincomplete period fetch",
+                        player.name, player.fide_id
+                    );
+                    ignored_incomplete.push(IncompletePlayer {
+                        name: player.name.clone(),
+                        fide_id: player.fide_id.clone(),
+                        rating: player.rating.clone(),
+                    });
+                    continue;
                 }
-                continue;
-            }
-        };
+                PeriodsFetch::Incomplete => {
+                    println!("INCOMPLETE\t{}\t{}", player.name, player.fide_id);
+                    incomplete.push(IncompletePlayer {
+                        name: player.name.clone(),
+                        fide_id: player.fide_id.clone(),
+                        rating: player.rating.clone(),
+                    });
+                    // Tighten the scan; keep summaries so the list can still
+                    // grow toward a real 30th for cutoff purposes.
+                    let tight_floor =
+                        tpr_list_floor(&summaries, band_incomplete, list, anchor_elo_year);
+                    rating_floor = rating_floor.max(tight_floor);
+                    retain_within_tpr_band(&mut summaries, band_incomplete, list, anchor_elo_year);
+                    continue;
+                }
+            };
 
         let total_games: usize = results.iter().map(|r| r.games.len()).sum();
         if total_games < MIN_GAMES {
@@ -137,7 +149,7 @@ pub async fn process_players(
         }
 
         let player_rating: f64 = player.rating.parse()?;
-        let report = tpr_report(&results, player_rating)?;
+        let report = tpr_report(&results, player_rating, top30)?;
         let print_outcome = incomplete.is_empty();
         if print_outcome {
             for window in &report.windows {
@@ -146,6 +158,10 @@ pub async fn process_players(
                     window.start_period, window.end_period, window.games, window.tpr
                 );
             }
+            println!(
+                "{}\tBONUS\t{:.2}\t{}",
+                player.name, report.bonus_sum, report.elo_year_periods
+            );
             println!("{}\tELO_YEAR\t{}", player.name, report.elo_year);
             println!(
                 "{}\tTPR_ALL\t{}\t{}",
@@ -166,8 +182,8 @@ pub async fn process_players(
         } else {
             band_incomplete
         };
-        retain_within_tpr_band(&mut summaries, band);
-        rating_floor = tpr_list_floor(&summaries, band);
+        retain_within_tpr_band(&mut summaries, band, list, anchor_elo_year);
+        rating_floor = tpr_list_floor(&summaries, band, list, anchor_elo_year);
         maybe_print_new_anchor(list, &summaries, &mut anchor_elo_year, print_outcome);
     }
 
@@ -179,7 +195,7 @@ pub async fn process_players(
         summaries,
         incomplete,
         ignored_incomplete,
-        cutoff_rating: rating_floor,
+        cutoff_rating: Some(rating_floor),
     })
 }
 
@@ -203,14 +219,8 @@ pub async fn complete_incomplete_players(
         let mut still_incomplete = Vec::new();
         for player in &remaining {
             println!("{}\t{}\tretry", player.name, player.fide_id);
-            match periods_for_player(
-                &player.fide_id,
-                periods,
-                player.recent_games,
-                max_attempts,
-                initial_wait_millis,
-            )
-            .await?
+            match periods_for_player(&player.fide_id, periods, max_attempts, initial_wait_millis)
+                .await?
             {
                 PeriodsFetch::Complete { .. } => {
                     println!("COMPLETE\t{}\t{}", player.name, player.fide_id);
@@ -239,9 +249,30 @@ fn tpr_list_anchor(summaries: &[PlayerSummary]) -> Option<i32> {
     summaries.get(TPR_LIST_ANCHOR_RANK - 1).map(|s| s.elo_year)
 }
 
-/// Floor ELO_YEAR for list membership once the anchor rank is filled.
-fn tpr_list_floor(summaries: &[PlayerSummary], band: i32) -> Option<i32> {
-    Some(tpr_list_anchor(summaries)? - band)
+/// Provisional anchor used before a real 30th place exists.
+fn provisional_anchor(list: &str) -> i32 {
+    if list == "women" {
+        PROVISIONAL_ANCHOR_WOMEN
+    } else {
+        PROVISIONAL_ANCHOR_OPEN
+    }
+}
+
+/// Anchor for cutoff: real 30th if present, else a previously seen 30th, else provisional.
+fn cutoff_anchor(summaries: &[PlayerSummary], list: &str, saved_anchor: Option<i32>) -> i32 {
+    tpr_list_anchor(summaries)
+        .or(saved_anchor)
+        .unwrap_or_else(|| provisional_anchor(list))
+}
+
+/// Floor ELO_YEAR / scan cutoff: anchor minus `band`.
+fn tpr_list_floor(
+    summaries: &[PlayerSummary],
+    band: i32,
+    list: &str,
+    saved_anchor: Option<i32>,
+) -> i32 {
+    cutoff_anchor(summaries, list, saved_anchor) - band
 }
 
 fn maybe_print_new_anchor(
@@ -267,12 +298,14 @@ fn maybe_print_new_anchor(
     );
 }
 
-/// Keep everyone until there are [`TPR_LIST_ANCHOR_RANK`] players; then keep
-/// those within `band` of the anchor's ELO_YEAR.
-fn retain_within_tpr_band(summaries: &mut Vec<PlayerSummary>, band: i32) {
-    let Some(floor) = tpr_list_floor(summaries, band) else {
-        return;
-    };
+/// Keep players within `band` of the cutoff anchor's ELO_YEAR.
+fn retain_within_tpr_band(
+    summaries: &mut Vec<PlayerSummary>,
+    band: i32,
+    list: &str,
+    saved_anchor: Option<i32>,
+) {
+    let floor = tpr_list_floor(summaries, band, list, saved_anchor);
     summaries.retain(|s| s.elo_year >= floor);
 }
 
@@ -297,7 +330,6 @@ mod tests {
             name: name.into(),
             fide_id: "0".into(),
             rating: rating.into(),
-            recent_games: 0,
         }
     }
 
@@ -341,12 +373,25 @@ mod tests {
     }
 
     #[test]
-    fn keeps_everyone_before_anchor_rank_is_filled() {
+    fn keeps_everyone_above_provisional_floor_before_anchor() {
+        // Open provisional anchor 2750 − 150 = 2600; all of these are above that.
         let mut summaries: Vec<_> = (0..29)
             .map(|i| summary(&format!("p{i}"), 2800 - i))
             .collect();
-        retain_within_tpr_band(&mut summaries, TPR_LIST_BAND);
+        retain_within_tpr_band(&mut summaries, TPR_LIST_BAND, "open", None);
         assert_eq!(summaries.len(), 29);
+    }
+
+    #[test]
+    fn provisional_floor_cuts_below_open_default() {
+        let mut summaries = vec![
+            summary("high", 2700),
+            summary("edge", 2600),
+            summary("below", 2599),
+        ];
+        retain_within_tpr_band(&mut summaries, TPR_LIST_BAND, "open", None);
+        assert_eq!(summaries.len(), 2);
+        assert!(summaries.iter().all(|s| s.name != "below"));
     }
 
     #[test]
@@ -356,52 +401,63 @@ mod tests {
         summaries.push(summary("edge", 2550));
         summaries.push(summary("below", 2549));
         sort_summaries_by_tpr(&mut summaries);
-        retain_within_tpr_band(&mut summaries, TPR_LIST_BAND);
+        retain_within_tpr_band(&mut summaries, TPR_LIST_BAND, "open", None);
         assert_eq!(summaries.len(), 31);
         assert!(summaries.iter().any(|s| s.name == "edge"));
         assert!(summaries.iter().all(|s| s.name != "below"));
-        assert_eq!(tpr_list_floor(&summaries, TPR_LIST_BAND), Some(2550));
+        assert_eq!(
+            tpr_list_floor(&summaries, TPR_LIST_BAND, "open", None),
+            2550
+        );
     }
 
     #[test]
     fn incomplete_band_keeps_a_higher_floor() {
         let mut summaries: Vec<_> = (0..30).map(|i| summary(&format!("top{i}"), 2700)).collect();
         sort_summaries_by_tpr(&mut summaries);
-        assert_eq!(tpr_list_floor(&summaries, TPR_LIST_BAND), Some(2550));
         assert_eq!(
-            tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE),
-            Some(2700 - TPR_LIST_BAND_INCOMPLETE)
+            tpr_list_floor(&summaries, TPR_LIST_BAND, "open", None),
+            2550
+        );
+        assert_eq!(
+            tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE, "open", None),
+            2700 - TPR_LIST_BAND_INCOMPLETE
         );
     }
 
     #[test]
-    fn no_floor_before_anchor_rank() {
+    fn provisional_floor_before_anchor_rank() {
         let summaries: Vec<_> = (0..29)
             .map(|i| summary(&format!("p{i}"), 2800 - i))
             .collect();
-        assert_eq!(tpr_list_floor(&summaries, TPR_LIST_BAND), None);
-        assert_eq!(tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE), None);
+        assert_eq!(
+            tpr_list_floor(&summaries, TPR_LIST_BAND, "open", None),
+            PROVISIONAL_ANCHOR_OPEN - TPR_LIST_BAND
+        );
+        assert_eq!(
+            tpr_list_floor(&summaries, TPR_LIST_BAND, "women", None),
+            PROVISIONAL_ANCHOR_WOMEN - TPR_LIST_BAND
+        );
     }
 
-    /// Incomplete before the 30th must not invent a floor from that player's rating.
     #[test]
-    fn incomplete_floor_requires_anchor() {
+    fn incomplete_floor_uses_provisional_without_anchor() {
         let summaries: Vec<_> = (0..10)
             .map(|i| summary(&format!("p{i}"), 2800 - i))
             .collect();
-        let anchor_elo_year: Option<i32> = None;
-        let floor = tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE)
-            .or_else(|| anchor_elo_year.map(|a| a - TPR_LIST_BAND_INCOMPLETE));
-        assert_eq!(floor, None);
+        assert_eq!(
+            tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE, "open", None),
+            PROVISIONAL_ANCHOR_OPEN - TPR_LIST_BAND_INCOMPLETE
+        );
     }
 
     #[test]
     fn incomplete_floor_uses_saved_anchor() {
-        let anchor_elo_year = Some(2700);
         let summaries: Vec<PlayerSummary> = Vec::new();
-        let floor = tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE)
-            .or_else(|| anchor_elo_year.map(|a| a - TPR_LIST_BAND_INCOMPLETE));
-        assert_eq!(floor, Some(2700 - TPR_LIST_BAND_INCOMPLETE));
+        assert_eq!(
+            tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE, "open", Some(2700)),
+            2700 - TPR_LIST_BAND_INCOMPLETE
+        );
     }
 
     #[test]
@@ -409,16 +465,19 @@ mod tests {
         // With incompletes present we use the tighter band, but summaries are kept
         // so the list can still reach the 30th for cutoff.
         let mut summaries: Vec<_> = (0..29)
-            .map(|i| summary(&format!("p{i}"), 2800 - i as i32))
+            .map(|i| summary(&format!("p{i}"), 2800 - i))
             .collect();
-        assert_eq!(tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE), None);
+        assert_eq!(
+            tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE, "open", None),
+            PROVISIONAL_ANCHOR_OPEN - TPR_LIST_BAND_INCOMPLETE
+        );
         summaries.push(summary("p29", 2771));
         sort_summaries_by_tpr(&mut summaries);
-        retain_within_tpr_band(&mut summaries, TPR_LIST_BAND_INCOMPLETE);
+        retain_within_tpr_band(&mut summaries, TPR_LIST_BAND_INCOMPLETE, "open", None);
         assert_eq!(summaries.len(), 30);
         assert_eq!(
-            tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE),
-            Some(2771 - TPR_LIST_BAND_INCOMPLETE)
+            tpr_list_floor(&summaries, TPR_LIST_BAND_INCOMPLETE, "open", None),
+            2771 - TPR_LIST_BAND_INCOMPLETE
         );
     }
 }

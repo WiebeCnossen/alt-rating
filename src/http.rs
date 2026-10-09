@@ -41,8 +41,6 @@ impl Error for RetryLimitReached {}
 /// How a text GET should present itself to the remote host.
 #[derive(Debug, Clone, Copy)]
 pub enum TextFetchKind<'a> {
-    /// Full page navigation (HTML document).
-    Document,
     /// XHR/AJAX request, typically with a profile page as referer.
     Ajax { referer: &'a str },
 }
@@ -77,16 +75,6 @@ fn apply_text_headers(
         request
     };
     match kind {
-        TextFetchKind::Document => Ok(request
-            .header(
-                ACCEPT,
-                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            )
-            .header("Upgrade-Insecure-Requests", "1")
-            .header("Sec-Fetch-Dest", "document")
-            .header("Sec-Fetch-Mode", "navigate")
-            .header("Sec-Fetch-Site", "none")
-            .header("Sec-Fetch-User", "?1")),
         TextFetchKind::Ajax { referer } => Ok(request
             .header(ACCEPT, "text/html, */*;q=0.01")
             .header("X-Requested-With", "XMLHttpRequest")

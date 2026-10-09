@@ -1,3 +1,4 @@
+mod bonus;
 mod cache;
 mod fide;
 mod http;
@@ -7,14 +8,16 @@ mod pipeline;
 mod rating_list;
 mod tpr;
 
+use bonus::{build_top30_for_periods, required_list_months};
+use cache::init_cache;
 use clap::Parser;
 use http::DEFAULT_WAIT_MILLIS;
 use output::{print_summary_table, summary_csv_path, write_summary_csv};
 use pipeline::{
-    TPR_LIST_BAND_INCOMPLETE, complete_incomplete_players, highest_rated, last_12_rating_periods,
-    process_players,
+    ProcessPlayersArgs, TPR_LIST_BAND_INCOMPLETE, complete_incomplete_players, highest_rated,
+    last_12_rating_periods, process_players,
 };
-use rating_list::fetch_top_players;
+use rating_list::{fetch_top_players, load_compact_lists_by_period};
 use std::error::Error;
 
 #[derive(Parser, Debug)]
@@ -41,29 +44,43 @@ struct Args {
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     println!("INIT");
+    init_cache()?;
     let periods = last_12_rating_periods();
     let (men_players, women_players) = fetch_top_players(args.retries, args.wait).await?;
 
+    let list_months = required_list_months(&periods)?;
+    let lists_by_period =
+        load_compact_lists_by_period(&list_months, args.retries, args.wait).await?;
+    let men_top30 = build_top30_for_periods(&periods, 'M', &lists_by_period)?;
+    let women_top30 = build_top30_for_periods(&periods, 'F', &lists_by_period)?;
+    println!(
+        "TOP30_READY\tmonths\t{}\tlists\t{}",
+        list_months.len(),
+        lists_by_period.len()
+    );
+
     loop {
-        let men = process_players(
-            "open",
-            &men_players,
-            &periods,
-            args.retries,
-            args.wait,
-            args.band_incomplete,
-            args.ignore_incomplete,
-        )
+        let men = process_players(ProcessPlayersArgs {
+            list: "open",
+            players: &men_players,
+            periods: &periods,
+            top30: &men_top30,
+            max_attempts: args.retries,
+            initial_wait_millis: args.wait,
+            band_incomplete: args.band_incomplete,
+            ignore_incomplete: args.ignore_incomplete,
+        })
         .await?;
-        let women = process_players(
-            "women",
-            &women_players,
-            &periods,
-            args.retries,
-            args.wait,
-            args.band_incomplete,
-            args.ignore_incomplete,
-        )
+        let women = process_players(ProcessPlayersArgs {
+            list: "women",
+            players: &women_players,
+            periods: &periods,
+            top30: &women_top30,
+            max_attempts: args.retries,
+            initial_wait_millis: args.wait,
+            band_incomplete: args.band_incomplete,
+            ignore_incomplete: args.ignore_incomplete,
+        })
         .await?;
 
         let mut incomplete = men.incomplete;
