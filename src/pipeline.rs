@@ -115,16 +115,30 @@ pub async fn process_players(
                 PeriodsFetch::Complete {
                     results,
                     downloaded,
+                    progress,
                 } => {
                     if downloaded {
-                        println!("COMPLETE\t{}\t{}", player.name, player.fide_id);
+                        println!(
+                            "COMPLETE\t{}\t{}\tperiods\t{}/{}\tgames\t{}/{}",
+                            player.name,
+                            player.fide_id,
+                            progress.periods_done,
+                            progress.periods_total,
+                            progress.games_done,
+                            progress.games_total
+                        );
                     }
                     results
                 }
-                PeriodsFetch::Incomplete if ignore_incomplete => {
+                PeriodsFetch::Incomplete { progress } if ignore_incomplete => {
                     println!(
-                        "SKIP\t{}\t{}\tincomplete period fetch",
-                        player.name, player.fide_id
+                        "SKIP\t{}\t{}\tincomplete period fetch\tperiods\t{}/{}\tgames\t{}/{}",
+                        player.name,
+                        player.fide_id,
+                        progress.periods_done,
+                        progress.periods_total,
+                        progress.games_done,
+                        progress.games_total
                     );
                     ignored_incomplete.push(IncompletePlayer {
                         name: player.name.clone(),
@@ -133,8 +147,16 @@ pub async fn process_players(
                     });
                     continue;
                 }
-                PeriodsFetch::Incomplete => {
-                    println!("INCOMPLETE\t{}\t{}", player.name, player.fide_id);
+                PeriodsFetch::Incomplete { progress } => {
+                    println!(
+                        "INCOMPLETE\t{}\t{}\tperiods\t{}/{}\tgames\t{}/{}",
+                        player.name,
+                        player.fide_id,
+                        progress.periods_done,
+                        progress.periods_total,
+                        progress.games_done,
+                        progress.games_total
+                    );
                     incomplete.push(IncompletePlayer {
                         name: player.name.clone(),
                         fide_id: player.fide_id.clone(),
@@ -237,11 +259,27 @@ pub async fn complete_incomplete_players(
             match periods_for_player(&player.fide_id, periods, max_attempts, initial_wait_millis)
                 .await?
             {
-                PeriodsFetch::Complete { .. } => {
-                    println!("COMPLETE\t{}\t{}", player.name, player.fide_id);
+                PeriodsFetch::Complete { progress, .. } => {
+                    println!(
+                        "COMPLETE\t{}\t{}\tperiods\t{}/{}\tgames\t{}/{}",
+                        player.name,
+                        player.fide_id,
+                        progress.periods_done,
+                        progress.periods_total,
+                        progress.games_done,
+                        progress.games_total
+                    );
                 }
-                PeriodsFetch::Incomplete => {
-                    println!("INCOMPLETE\t{}\t{}", player.name, player.fide_id);
+                PeriodsFetch::Incomplete { progress } => {
+                    println!(
+                        "INCOMPLETE\t{}\t{}\tperiods\t{}/{}\tgames\t{}/{}",
+                        player.name,
+                        player.fide_id,
+                        progress.periods_done,
+                        progress.periods_total,
+                        progress.games_done,
+                        progress.games_total
+                    );
                     still_incomplete.push(player.clone());
                 }
             }

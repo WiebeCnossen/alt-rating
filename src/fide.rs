@@ -17,6 +17,18 @@ const PROFILE_CALC_URL: &str = "https://ratings.fide.com/profile/{id}/calculatio
 const CALC_URL: &str =
     "https://ratings.fide.com/a_indv_calculation.php?id_number={id}&rating_period={period}&t=0";
 
+/// Progress toward loading all period games for a player.
+#[derive(Clone, Debug)]
+pub struct FetchProgress {
+    /// Periods successfully loaded (cached or fetched).
+    pub periods_done: usize,
+    pub periods_total: usize,
+    /// Games in loaded periods.
+    pub games_done: usize,
+    /// Expected games across all periods (from rating-list `Gms`).
+    pub games_total: usize,
+}
+
 /// Outcome of loading a player's period games.
 pub enum PeriodsFetch {
     /// All required periods were loaded (cached and/or fetched).
@@ -24,9 +36,10 @@ pub enum PeriodsFetch {
         results: Vec<PeriodResult>,
         /// At least one period's rated games were downloaded from FIDE.
         downloaded: bool,
+        progress: FetchProgress,
     },
     /// A required period fetch exhausted retries; nothing was cached for that miss.
-    Incomplete,
+    Incomplete { progress: FetchProgress },
 }
 
 /// Load period games for `fide_id`, using rating-list `Gms` as the expected
@@ -42,6 +55,7 @@ pub async fn periods_for_player(
         .map(|period| expected_gms_from_rating_list(fide_id, period))
         .collect::<Result<_, _>>()?;
 
+    let games_total: usize = expected.iter().map(|&n| n as usize).sum();
     let mut results = Vec::with_capacity(periods.len());
     let mut downloaded = false;
 
@@ -74,7 +88,11 @@ pub async fn periods_for_player(
                     downloaded = true;
                     result
                 }
-                Err(err) if is_retry_limit(err.as_ref()) => return Ok(PeriodsFetch::Incomplete),
+                Err(err) if is_retry_limit(err.as_ref()) => {
+                    return Ok(PeriodsFetch::Incomplete {
+                        progress: fetch_progress(&results, periods.len(), games_total),
+                    });
+                }
                 Err(err) => return Err(err),
             }
         };
@@ -84,9 +102,23 @@ pub async fn periods_for_player(
     }
 
     Ok(PeriodsFetch::Complete {
+        progress: fetch_progress(&results, periods.len(), games_total),
         results,
         downloaded,
     })
+}
+
+fn fetch_progress(
+    results: &[PeriodResult],
+    periods_total: usize,
+    games_total: usize,
+) -> FetchProgress {
+    FetchProgress {
+        periods_done: results.len(),
+        periods_total,
+        games_done: results.iter().map(|r| r.games.len()).sum(),
+        games_total,
+    }
 }
 
 fn expected_gms_from_rating_list(fide_id: &str, period: &str) -> Result<u32, Box<dyn Error>> {
