@@ -383,6 +383,7 @@ mod tests {
             fide_id: "0".into(),
             rating: "2500".into(),
             elo_year,
+            bonus: 0.0,
             all_games_tpr: elo_year,
             raw_games_tpr: elo_year,
             total_games: 50,

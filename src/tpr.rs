@@ -132,6 +132,7 @@ pub fn summary_from_report(
         fide_id,
         rating,
         elo_year: report.elo_year,
+        bonus: report.bonus_sum,
         all_games_tpr: report.all_games_tpr,
         raw_games_tpr: report.raw_games_tpr,
         total_games: report.total_games,

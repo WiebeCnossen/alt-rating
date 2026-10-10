@@ -61,7 +61,7 @@ pub async fn periods_for_player(
 
     for (period, &expected_gms) in periods.iter().zip(expected.iter()) {
         if let Some(cached) = load_period_result(fide_id, period) {
-            if cached.games.len() as u32 == expected_gms {
+            if game_count_matches_expected(cached.games.len(), expected_gms) {
                 results.push(cached);
                 continue;
             }
@@ -144,15 +144,22 @@ async fn fetch_period_with_game_count(
         max_attempts,
         initial_wait_millis,
         TextFetchKind::Ajax { referer: &referer },
-        |text| {
-            parse_games(text)
-                .map(|games| games.len() as u32 == expected_games)
-                .unwrap_or(false)
+        |text| match parse_games(text) {
+            Ok(games) if game_count_matches_expected(games.len(), expected_games) => Ok(()),
+            Ok(games) => Err(format!(
+                "games\t{}/{}\tperiod\t{period}\tplayer\t{fide_id}",
+                games.len(),
+                expected_games
+            )),
+            Err(err) => Err(format!(
+                "parse failed\t{err}\tperiod\t{period}\tplayer\t{fide_id}"
+            )),
         },
     )
     .await?;
+    // Fetched games are authoritative when the count is within one of the list.
     let games = parse_games(&html)?;
-    if games.len() as u32 != expected_games {
+    if !game_count_matches_expected(games.len(), expected_games) {
         return Err(format!(
             "period {period} for {fide_id}: expected {expected_games} games, got {}",
             games.len()
@@ -164,6 +171,11 @@ async fn fetch_period_with_game_count(
         period: period.to_string(),
         games,
     })
+}
+
+/// Accept exact matches and off-by-one vs rating-list `Gms` (fetched games win).
+fn game_count_matches_expected(found: usize, expected: u32) -> bool {
+    found.abs_diff(expected as usize) <= 1
 }
 
 pub fn parse_games(html: &str) -> Result<Vec<Game>, Box<dyn Error>> {
@@ -217,6 +229,18 @@ mod tests {
         assert_eq!(games[1].color, "white");
         assert_eq!(games[1].opponent_name, "Keymer, Vincent");
         assert_eq!(games[1].result, "0.50");
+    }
+
+    #[test]
+    fn game_count_allows_exact_and_off_by_one() {
+        assert!(game_count_matches_expected(9, 9));
+        assert!(game_count_matches_expected(8, 9));
+        assert!(game_count_matches_expected(10, 9));
+        assert!(game_count_matches_expected(0, 0));
+        assert!(game_count_matches_expected(1, 0));
+        assert!(game_count_matches_expected(0, 1));
+        assert!(!game_count_matches_expected(7, 9));
+        assert!(!game_count_matches_expected(11, 9));
     }
 
     #[test]

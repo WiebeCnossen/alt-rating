@@ -20,13 +20,14 @@ pub async fn write_summary_csv(
     summaries: &[PlayerSummary],
 ) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(OUTPUT_DIR).await?;
-    let mut out = String::from("name,fide_id,elo_year,rating,diff,games\n");
+    let mut out = String::from("name,fide_id,elo_year,bonus,rating,diff,games\n");
     for s in summaries {
         out.push_str(&format!(
-            "{},{},{},{},{},{}\n",
+            "{},{},{},{:.2},{},{},{}\n",
             csv_escape(&s.name),
             csv_escape(&s.fide_id),
             s.elo_year,
+            s.bonus,
             csv_escape(&s.rating),
             s.diff(),
             s.total_games

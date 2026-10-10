@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 /// Default initial wait before each fetch attempt (milliseconds).
-pub const DEFAULT_WAIT_MILLIS: u64 = 100;
+pub const DEFAULT_WAIT_MILLIS: u64 = 1_000;
 /// Stop doubling the backoff once the wait exceeds this many milliseconds.
 const WAIT_DOUBLE_LIMIT_MILLIS: u64 = 5_000;
 
@@ -86,32 +86,28 @@ fn apply_text_headers(
 }
 
 /// Wait, then GET `url`. On transport/HTTP failure or rejected body, double the wait
-/// (until over 5s) and retry up to `max_attempts` times until `accept` returns true.
+/// (until over 5s) and retry up to `max_attempts` times until `accept` returns `Ok(())`.
+/// `accept` returns `Err(reason)` when the body is not usable; that reason is logged.
 /// Retries after an OK-but-rejected body send cache-busting request headers.
 pub async fn fetch_text_with_retry(
     url: &str,
     max_attempts: u32,
     initial_wait_millis: u64,
     kind: TextFetchKind<'_>,
-    mut accept: impl FnMut(&str) -> bool,
+    mut accept: impl FnMut(&str) -> Result<(), String>,
 ) -> Result<String, Box<dyn Error>> {
     let mut wait_millis = initial_wait_millis;
     let mut bust_cache = false;
-    for _ in 0..max_attempts {
+    for attempt in 1..=max_attempts {
         sleep(Duration::from_millis(wait_millis)).await;
         match try_fetch_text(url, kind, bust_cache).await {
-            Ok(text) if accept(&text) => return Ok(text),
-            Ok(_) if !bust_cache => {
-                println!("Empty {url}");
-                bust_cache = true;
-            }
-            Ok(_) => {
-                println!("Still empty, giving up");
-                return Err(Box::new(RetryLimitReached {
-                    url: url.to_string(),
-                    attempts: max_attempts,
-                }));
-            }
+            Ok(text) => match accept(&text) {
+                Ok(()) => return Ok(text),
+                Err(reason) => {
+                    println!("REJECT\t{url}\tattempt\t{attempt}/{max_attempts}\t{reason}");
+                    bust_cache = true;
+                }
+            },
             Err(e) => {
                 println!("Error {e}");
             }

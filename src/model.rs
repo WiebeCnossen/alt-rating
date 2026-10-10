@@ -38,6 +38,8 @@ pub struct PlayerSummary {
     pub fide_id: String,
     pub rating: String,
     pub elo_year: i32,
+    /// Sum of top-30 win bonuses for the year (before rounding into `elo_year`).
+    pub bonus: f64,
     pub all_games_tpr: i32,
     pub raw_games_tpr: i32,
     pub total_games: usize,
