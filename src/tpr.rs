@@ -166,33 +166,29 @@ fn ratings_for_games(games: &[RatedGame], player_rating: f64) -> SetRatings {
     }
 }
 
-/// All consecutive period ranges [start, end] with at least [`MIN_GAMES`] games
-/// that do not start or end on an empty period (empty periods in the middle are
-/// allowed).
+/// Consecutive period ranges [start, end] with at least [`MIN_GAMES`] games that
+/// all end on the most recent non-empty period and do not start on an empty
+/// period (empty periods in the middle are allowed).
 fn consecutive_period_sets(period_games: &[PeriodGameList]) -> Vec<ConsecutiveWindow> {
-    let n = period_games.len();
     let counts: Vec<usize> = period_games.iter().map(|(_, g)| g.len()).collect();
-    let mut windows = Vec::new();
+    let Some(end) = counts.iter().rposition(|&c| c > 0) else {
+        return Vec::new();
+    };
 
-    for start in 0..n {
+    let mut windows = Vec::new();
+    for start in 0..=end {
         if counts[start] == 0 {
             continue;
         }
-        let mut total = 0usize;
-        for end in start..n {
-            total += counts[end];
-            if counts[end] == 0 {
-                continue;
-            }
-            if total < MIN_GAMES {
-                continue;
-            }
-            let games: Vec<RatedGame> = period_games[start..=end]
-                .iter()
-                .flat_map(|(_, g)| g.iter().copied())
-                .collect();
-            windows.push(ConsecutiveWindow { start, end, games });
+        let total: usize = counts[start..=end].iter().sum();
+        if total < MIN_GAMES {
+            continue;
         }
+        let games: Vec<RatedGame> = period_games[start..=end]
+            .iter()
+            .flat_map(|(_, g)| g.iter().copied())
+            .collect();
+        windows.push(ConsecutiveWindow { start, end, games });
     }
 
     windows
@@ -274,43 +270,31 @@ mod tests {
     }
 
     #[test]
-    fn finds_all_consecutive_period_sets() {
+    fn finds_sets_ending_on_most_recent_non_empty_period() {
         let periods = vec![
             ("a".into(), vec![(2000.0, 1.0); 30]),
             ("b".into(), vec![(2000.0, 1.0); 30]),
             ("c".into(), vec![(2000.0, 1.0); 30]),
         ];
         let windows = consecutive_period_sets(&periods);
-        // All [start,end] with non-empty endpoints: (0,0),(0,1),(0,2),(1,1),(1,2),(2,2)
-        assert_eq!(windows.len(), 6);
+        // Only sets ending on the last non-empty period: (0,2),(1,2),(2,2)
+        assert_eq!(windows.len(), 3);
         assert_eq!(
             (windows[0].start, windows[0].end, windows[0].games.len()),
-            (0, 0, 30)
-        );
-        assert_eq!(
-            (windows[1].start, windows[1].end, windows[1].games.len()),
-            (0, 1, 60)
-        );
-        assert_eq!(
-            (windows[2].start, windows[2].end, windows[2].games.len()),
             (0, 2, 90)
         );
         assert_eq!(
-            (windows[3].start, windows[3].end, windows[3].games.len()),
-            (1, 1, 30)
-        );
-        assert_eq!(
-            (windows[4].start, windows[4].end, windows[4].games.len()),
+            (windows[1].start, windows[1].end, windows[1].games.len()),
             (1, 2, 60)
         );
         assert_eq!(
-            (windows[5].start, windows[5].end, windows[5].games.len()),
+            (windows[2].start, windows[2].end, windows[2].games.len()),
             (2, 2, 30)
         );
     }
 
     #[test]
-    fn omits_sets_that_start_or_end_on_empty_period() {
+    fn omits_sets_that_start_on_empty_or_end_before_latest() {
         let periods = vec![
             ("empty".into(), vec![]),
             ("a".into(), vec![(2000.0, 1.0); 30]),
@@ -318,17 +302,14 @@ mod tests {
             ("also_empty".into(), vec![]),
         ];
         let windows = consecutive_period_sets(&periods);
-        assert_eq!(windows.len(), 3);
+        // Latest non-empty is index 2; empty start skipped → (1,2),(2,2)
+        assert_eq!(windows.len(), 2);
         assert_eq!(
             (windows[0].start, windows[0].end, windows[0].games.len()),
-            (1, 1, 30)
-        );
-        assert_eq!(
-            (windows[1].start, windows[1].end, windows[1].games.len()),
             (1, 2, 60)
         );
         assert_eq!(
-            (windows[2].start, windows[2].end, windows[2].games.len()),
+            (windows[1].start, windows[1].end, windows[1].games.len()),
             (2, 2, 30)
         );
     }
@@ -340,7 +321,8 @@ mod tests {
             ("b".into(), vec![(2000.0, 1.0); MIN_GAMES - 1]),
         ];
         let windows = consecutive_period_sets(&periods);
-        // Single months are under the floor; only the combined set qualifies.
+        // Only sets ending on b: a alone is under the floor; a+b and b alone
+        // (also under floor) → only the combined set qualifies.
         assert_eq!(windows.len(), 1);
         assert_eq!(
             (windows[0].start, windows[0].end, windows[0].games.len()),
@@ -380,33 +362,31 @@ mod tests {
 
     #[test]
     fn reported_tpr_comes_from_longest_set_elo_year_is_max() {
-        // Strong short month vs weaker full span: max ELO_YEAR can come from a
-        // subset, while TPR_ALL/TPR_RAW stay on the longest (full) set.
+        // Strong recent month vs weaker full span: max ELO_YEAR can come from
+        // the latest-ending subset, while TPR_ALL/TPR_RAW stay on the longest set.
         let results = vec![
-            period("2025-01-01", 40, 2800.0, 1.0),
-            period("2025-02-01", 40, 2000.0, 0.0),
+            period("2025-01-01", 40, 2000.0, 0.0),
+            period("2025-02-01", 40, 2800.0, 1.0),
         ];
         let report = tpr_report(&results, 2500.0, &empty_top30()).unwrap();
         assert_eq!(report.total_games, 80);
-        assert_eq!(report.windows.len(), 3);
+        // Only sets ending on Feb: full year and Feb alone.
+        assert_eq!(report.windows.len(), 2);
 
         let full = ratings_for_games(
-            &[(2800.0, 1.0); 40]
+            &[(2000.0, 0.0); 40]
                 .into_iter()
-                .chain([(2000.0, 0.0); 40])
+                .chain([(2800.0, 1.0); 40])
                 .collect::<Vec<_>>(),
             2500.0,
         );
-        let first_only = ratings_for_games(&[(2800.0, 1.0); 40], 2500.0);
-        let second_only = ratings_for_games(&[(2000.0, 0.0); 40], 2500.0);
+        let latest_only = ratings_for_games(&[(2800.0, 1.0); 40], 2500.0);
 
         assert_eq!(report.all_games_tpr, full.all_games_tpr);
         assert_eq!(report.raw_games_tpr, full.raw_games_tpr);
         assert_eq!(
             report.elo_year_periods,
-            full.elo_year
-                .max(first_only.elo_year)
-                .max(second_only.elo_year)
+            full.elo_year.max(latest_only.elo_year)
         );
         assert_eq!(report.elo_year, report.elo_year_periods);
     }
@@ -415,18 +395,18 @@ mod tests {
     fn short_subset_uses_stuffing_and_penalty_for_elo_year() {
         let n = MIN_GAMES;
         let results = vec![
-            period("2025-01-01", n, 2700.0, 1.0),
-            period("2025-02-01", n, 2000.0, 0.0),
+            period("2025-01-01", n, 2000.0, 0.0),
+            period("2025-02-01", n, 2700.0, 1.0),
         ];
         let report = tpr_report(&results, 2500.0, &empty_top30()).unwrap();
-        let first_games = vec![(2700.0, 1.0); n];
-        let first = ratings_for_games(&first_games, 2500.0);
+        let latest_games = vec![(2700.0, 1.0); n];
+        let latest = ratings_for_games(&latest_games, 2500.0);
         let games_short = (TPR_GAME_THRESHOLD - n) as i32;
         assert_eq!(
-            first.elo_year,
-            first
+            latest.elo_year,
+            latest
                 .all_games_tpr
-                .min(first.raw_games_tpr - 2 * games_short)
+                .min(latest.raw_games_tpr - 2 * games_short)
         );
         assert_eq!(
             report.elo_year_periods,
@@ -436,12 +416,12 @@ mod tests {
             report
                 .windows
                 .iter()
-                .any(|w| w.games == n && w.tpr == first.elo_year)
+                .any(|w| w.games == n && w.tpr == latest.elo_year)
         );
         // Reported TPR_* still from the longest set.
-        let full_games: Vec<_> = first_games
+        let full_games: Vec<_> = vec![(2000.0, 0.0); n]
             .into_iter()
-            .chain(vec![(2000.0, 0.0); n])
+            .chain(latest_games)
             .collect();
         let full = ratings_for_games(&full_games, 2500.0);
         assert_eq!(report.all_games_tpr, full.all_games_tpr);
