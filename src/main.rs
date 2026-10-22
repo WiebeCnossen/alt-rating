@@ -12,12 +12,12 @@ use bonus::{build_top30_for_periods, required_list_months};
 use cache::init_cache;
 use clap::Parser;
 use http::DEFAULT_WAIT_MILLIS;
-use output::{print_summary_table, summary_csv_path, write_summary_csv};
+use output::{print_summary_table, summary_csv_path, summary_outputs_exist, write_summary_csv};
 use pipeline::{
     ProcessPlayersArgs, TPR_LIST_BAND_INCOMPLETE, complete_incomplete_players, highest_rated,
-    last_12_rating_periods, process_players,
+    last_12_rating_periods, process_players, rating_periods_ending_at,
 };
-use rating_list::{fetch_top_players, load_compact_lists_by_period};
+use rating_list::{fetch_top_players, load_compact_lists_by_period, parse_period};
 use std::error::Error;
 
 #[derive(Parser, Debug)]
@@ -45,8 +45,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     println!("INIT");
     init_cache()?;
-    let periods = last_12_rating_periods();
-    let (men_players, women_players) = fetch_top_players(args.retries, args.wait).await?;
+
+    for peildatum in last_12_rating_periods() {
+        let (year, month) = parse_period(&peildatum)?;
+        if summary_outputs_exist(year, month) {
+            println!("SKIP_PEILDATUM\t{peildatum}\tcsv exists");
+            continue;
+        }
+        println!("PEILDATUM\t{peildatum}");
+        run_peildatum(&args, year, month).await?;
+    }
+    Ok(())
+}
+
+async fn run_peildatum(args: &Args, year: i32, month: u32) -> Result<(), Box<dyn Error>> {
+    let periods = rating_periods_ending_at(year, month);
+    let (men_players, women_players) =
+        fetch_top_players(year, month, args.retries, args.wait).await?;
 
     let list_months = required_list_months(&periods)?;
     let lists_by_period =
@@ -97,8 +112,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         print_summary_table(&men.summaries);
         print_summary_table(&women.summaries);
-        write_summary_csv(summary_csv_path("open"), &men.summaries).await?;
-        write_summary_csv(summary_csv_path("women"), &women.summaries).await?;
+        write_summary_csv(summary_csv_path("open", year, month), &men.summaries).await?;
+        write_summary_csv(summary_csv_path("women", year, month), &women.summaries).await?;
         println!("INCOMPLETE_REMAINING\t0");
         report_ignored_highest("open", &men.ignored_incomplete, men.cutoff_rating);
         report_ignored_highest("women", &women.ignored_incomplete, women.cutoff_rating);

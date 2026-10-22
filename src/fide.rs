@@ -38,12 +38,15 @@ pub enum PeriodsFetch {
         downloaded: bool,
         progress: FetchProgress,
     },
-    /// A required period fetch exhausted retries; nothing was cached for that miss.
+    /// At least one required period fetch exhausted retries (others may still be cached).
     Incomplete { progress: FetchProgress },
 }
 
 /// Load period games for `fide_id`, using rating-list `Gms` as the expected
 /// game count per period (no profile `/calculations` round-trip).
+///
+/// If one period fails after retries, remaining periods are still attempted;
+/// successful ones are cached and the overall result is still `Incomplete`.
 pub async fn periods_for_player(
     fide_id: &str,
     periods: &[String],
@@ -58,6 +61,7 @@ pub async fn periods_for_player(
     let games_total: usize = expected.iter().map(|&n| n as usize).sum();
     let mut results = Vec::with_capacity(periods.len());
     let mut downloaded = false;
+    let mut incomplete = false;
 
     for (period, &expected_gms) in periods.iter().zip(expected.iter()) {
         if let Some(cached) = load_period_result(fide_id, period) {
@@ -89,9 +93,8 @@ pub async fn periods_for_player(
                     result
                 }
                 Err(err) if is_retry_limit(err.as_ref()) => {
-                    return Ok(PeriodsFetch::Incomplete {
-                        progress: fetch_progress(&results, periods.len(), games_total),
-                    });
+                    incomplete = true;
+                    continue;
                 }
                 Err(err) => return Err(err),
             }
@@ -101,8 +104,13 @@ pub async fn periods_for_player(
         results.push(result);
     }
 
+    let progress = fetch_progress(&results, periods.len(), games_total);
+    if incomplete {
+        return Ok(PeriodsFetch::Incomplete { progress });
+    }
+
     Ok(PeriodsFetch::Complete {
-        progress: fetch_progress(&results, periods.len(), games_total),
+        progress,
         results,
         downloaded,
     })

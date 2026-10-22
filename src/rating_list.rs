@@ -26,15 +26,13 @@ static RATING_LIST_PERIOD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(\d{2})\b").unwrap()
 });
 
-/// Load the current-month standard rating list from cache, or download it.
+/// Load the standard rating list for peildatum `year`/`month` from cache, or download it.
 pub async fn fetch_top_players(
+    year: i32,
+    month: u32,
     max_attempts: u32,
     initial_wait_millis: u64,
 ) -> Result<(Vec<Player>, Vec<Player>), Box<dyn Error>> {
-    let today = Utc::now().date_naive();
-    let year = today.year();
-    let month = today.month();
-
     if has_rating_list(year, month)
         && let Some(players) = load_rating_list_players(year, month, None)
     {
@@ -43,7 +41,12 @@ pub async fn fetch_top_players(
 
     let (list_year, list_month, players) =
         download_and_store_rating_list(year, month, max_attempts, initial_wait_millis).await?;
-    verify_rating_list_is_current_month(list_year, list_month)?;
+    if list_year != year || list_month != month {
+        return Err(format!(
+            "rating list period {list_year:04}-{list_month:02} does not match requested {year:04}-{month:02}"
+        )
+        .into());
+    }
     split_top_players(players)
 }
 
@@ -141,19 +144,6 @@ fn parse_rating_list_period(text: &str) -> Result<(i32, u32), Box<dyn Error>> {
         .ok_or_else(|| format!("unknown month abbreviation in rating list: {}", &caps[1]))?;
     let year = 2000 + caps[2].parse::<i32>()?;
     Ok((year, month))
-}
-
-fn verify_rating_list_is_current_month(year: i32, month: u32) -> Result<(), Box<dyn Error>> {
-    let today = Utc::now().date_naive();
-    if year == today.year() && month == today.month() {
-        return Ok(());
-    }
-    Err(format!(
-        "rating list period {year:04}-{month:02} is not the current month {:04}-{:02}",
-        today.year(),
-        today.month()
-    )
-    .into())
 }
 
 fn month_abbrev_to_number(abbrev: &str) -> Option<u32> {
@@ -365,23 +355,5 @@ mod tests {
     fn parses_rating_list_period_from_header() {
         let text = "ID Number      Name                                                         Fed Sex Tit  WTit OTit           FOA SEP26 Gms K  B-day Flag\n";
         assert_eq!(parse_rating_list_period(text).unwrap(), (2026, 9));
-    }
-
-    #[test]
-    fn accepts_rating_list_for_current_month() {
-        let today = Utc::now().date_naive();
-        verify_rating_list_is_current_month(today.year(), today.month()).unwrap();
-    }
-
-    #[test]
-    fn rejects_rating_list_for_other_month() {
-        let today = Utc::now().date_naive();
-        let other_month = if today.month() == 1 {
-            2
-        } else {
-            today.month() - 1
-        };
-        let err = verify_rating_list_is_current_month(today.year(), other_month).unwrap_err();
-        assert!(err.to_string().contains("is not the current month"));
     }
 }

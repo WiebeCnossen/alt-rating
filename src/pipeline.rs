@@ -48,15 +48,21 @@ pub struct ProcessPlayersArgs<'a> {
 /// Period `YYYY-MM-01` means games rated into the ratings list **as of** that
 /// date (not games played during that month). Once the current month's list is
 /// published, that period belongs in the window.
+///
+/// Also used as the list of peildata (reference months) to process.
 pub fn last_12_rating_periods() -> Vec<String> {
     let today = Utc::now().date_naive();
-    let first_of_this_month =
-        chrono::NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+    rating_periods_ending_at(today.year(), today.month())
+}
+
+/// 12 FIDE rating periods ending at the given peildatum month (`YYYY`, `MM`).
+pub fn rating_periods_ending_at(year: i32, month: u32) -> Vec<String> {
+    let end = chrono::NaiveDate::from_ymd_opt(year, month, 1).unwrap();
 
     (0..12)
         .rev()
         .map(|i| {
-            let d = first_of_this_month - Months::new(i);
+            let d = end - Months::new(i);
             format!("{:04}-{:02}-01", d.year(), d.month())
         })
         .collect()
@@ -426,13 +432,20 @@ mod tests {
         let current = format!("{:04}-{:02}-01", today.year(), today.month());
         assert_eq!(periods.last(), Some(&current));
 
-        let oldest = first_of_this_month_minus(11);
+        let oldest = first_of_month_minus(today.year(), today.month(), 11);
         assert_eq!(periods.first(), Some(&oldest));
     }
 
-    fn first_of_this_month_minus(months: u32) -> String {
-        let today = Utc::now().date_naive();
-        let first = chrono::NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+    #[test]
+    fn rating_periods_ending_at_historical_peildatum() {
+        let periods = rating_periods_ending_at(2025, 3);
+        assert_eq!(periods.len(), 12);
+        assert_eq!(periods.first().map(String::as_str), Some("2024-04-01"));
+        assert_eq!(periods.last().map(String::as_str), Some("2025-03-01"));
+    }
+
+    fn first_of_month_minus(year: i32, month: u32, months: u32) -> String {
+        let first = chrono::NaiveDate::from_ymd_opt(year, month, 1).unwrap();
         let d = first - Months::new(months);
         format!("{:04}-{:02}-01", d.year(), d.month())
     }

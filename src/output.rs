@@ -1,18 +1,18 @@
 use crate::model::PlayerSummary;
-use chrono::{Datelike, Utc};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
 const OUTPUT_DIR: &str = "output";
 
-pub fn summary_csv_path(prefix: &str) -> PathBuf {
-    let today = Utc::now().date_naive();
-    PathBuf::from(OUTPUT_DIR).join(format!(
-        "{prefix}-{:04}-{:02}.csv",
-        today.year(),
-        today.month()
-    ))
+pub fn summary_csv_path(prefix: &str, year: i32, month: u32) -> PathBuf {
+    PathBuf::from(OUTPUT_DIR).join(format!("{prefix}-{year:04}-{month:02}.csv"))
+}
+
+/// True when both open and women summary CSVs for this peildatum already exist.
+pub fn summary_outputs_exist(year: i32, month: u32) -> bool {
+    summary_csv_path("open", year, month).is_file()
+        && summary_csv_path("women", year, month).is_file()
 }
 
 pub async fn write_summary_csv(
