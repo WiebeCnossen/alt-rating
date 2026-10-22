@@ -1,11 +1,11 @@
 use crate::model::{CompactPlayer, PeriodResult};
 use crate::rating_list::{parse_period, period_minus_months};
+use crate::tpr::MIN_GAMES;
 use chrono::{Datelike, Months, NaiveDate};
 use std::collections::HashMap;
 use std::error::Error;
 
 pub const TOP_N: u32 = 30;
-pub const MIN_ACTIVE_GAMES: u32 = 20;
 const BONUS_RANK_1: f64 = 3.0;
 const BONUS_RANK_30: f64 = 0.1;
 
@@ -82,7 +82,7 @@ pub fn build_top30_month(
     let mut active: Vec<&CompactPlayer> = current
         .iter()
         .filter(|p| {
-            p.sex == sex && games_by_id.get(&p.fide_id).copied().unwrap_or(0) >= MIN_ACTIVE_GAMES
+            p.sex == sex && games_by_id.get(&p.fide_id).copied().unwrap_or(0) >= MIN_GAMES as u32
         })
         .collect();
     active.sort_by(|a, b| {
@@ -290,11 +290,11 @@ mod tests {
 
     #[test]
     fn inactive_players_excluded_from_top30() {
-        // gms=1 per month → 12 over the window (< 20) for Low; High has 2 → 24.
+        // gms=2 per month → 24 over the window (< 30) for Low; High has 3 → 36.
         let end = "2026-06-01";
         let players = vec![
-            compact("1", "High, Active", 'M', 2800, 2),
-            compact("2", "Low, Inactive", 'M', 2790, 1),
+            compact("1", "High, Active", 'M', 2800, 3),
+            compact("2", "Low, Inactive", 'M', 2790, 2),
         ];
         let lists = lists_with_constant_gms(&players, end);
         let top = build_top30_month(end, 'M', &lists).unwrap();
@@ -312,7 +312,7 @@ mod tests {
                 &format!("Player, {i}"),
                 'M',
                 2800 - i,
-                2,
+                3,
             ));
         }
         let lists = lists_with_constant_gms(&players, list_month);
@@ -337,17 +337,17 @@ mod tests {
     #[test]
     fn tied_rank_uses_shared_bonus() {
         let end = "2026-06-01";
-        let mut players = vec![compact("1", "One", 'M', 2800, 2)];
+        let mut players = vec![compact("1", "One", 'M', 2800, 3)];
         // Two tied for #2
-        players.push(compact("2", "TwoA", 'M', 2700, 2));
-        players.push(compact("3", "TwoB", 'M', 2700, 2));
+        players.push(compact("2", "TwoA", 'M', 2700, 3));
+        players.push(compact("3", "TwoB", 'M', 2700, 3));
         for i in 0..27u32 {
             players.push(compact(
                 &format!("x{i}"),
                 &format!("Fill, {i}"),
                 'M',
                 2600 - i,
-                2,
+                3,
             ));
         }
         let lists = lists_with_constant_gms(&players, end);

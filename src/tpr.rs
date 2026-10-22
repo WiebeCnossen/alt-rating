@@ -10,9 +10,9 @@ const VIRTUAL_RATING_OFFSET: f64 = 0.0;
 /// Drop games where the opponent is more than this many points below the player.
 pub const MAX_WEAKER_OPPONENT_DIFF: f64 = 350.0;
 
-/// Minimum games for a period set to count toward ELO_YEAR, and for a player
-/// to appear on the output lists.
-pub const MIN_GAMES: usize = 20;
+/// Minimum games for a period set to count toward ELO_YEAR, for a player to
+/// appear on the output lists, and for activity in the top-30 bonus index.
+pub const MIN_GAMES: usize = 30;
 
 /// Whether a game against `opponent_rating` counts for the player rated `player_rating`.
 pub fn opponent_counts(player_rating: f64, opponent_rating: f64) -> bool {
@@ -512,7 +512,7 @@ mod tests {
                 name: format!("Player, {i}"),
                 sex: 'M',
                 rating: 2800 - i,
-                gms: 2,
+                gms: 3,
             });
         }
         let mut lists = HashMap::new();
