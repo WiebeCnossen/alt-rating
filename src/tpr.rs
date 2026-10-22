@@ -7,9 +7,53 @@ const RATING_K: f64 = 10.0;
 const TPR_GAME_THRESHOLD: usize = 50;
 const VIRTUAL_RATING_OFFSET: f64 = 0.0;
 
+/// Drop games where the opponent is more than this many points below the player.
+pub const MAX_WEAKER_OPPONENT_DIFF: f64 = 350.0;
+
 /// Minimum games for a period set to count toward ELO_YEAR, and for a player
 /// to appear on the output lists.
 pub const MIN_GAMES: usize = 20;
+
+/// Whether a game against `opponent_rating` counts for the player rated `player_rating`.
+pub fn opponent_counts(player_rating: f64, opponent_rating: f64) -> bool {
+    opponent_rating + MAX_WEAKER_OPPONENT_DIFF >= player_rating
+}
+
+/// Drop games against opponents more than [`MAX_WEAKER_OPPONENT_DIFF`] below `player_rating`.
+pub fn filter_period_games(
+    period: &PeriodResult,
+    player_rating: f64,
+) -> Result<PeriodResult, Box<dyn Error>> {
+    let mut games = Vec::with_capacity(period.games.len());
+    for g in &period.games {
+        let opp: f64 = g.opponent_rating.trim().parse()?;
+        if opponent_counts(player_rating, opp) {
+            games.push(g.clone());
+        }
+    }
+    Ok(PeriodResult {
+        fide_id: period.fide_id.clone(),
+        period: period.period.clone(),
+        games,
+    })
+}
+
+/// Games in `results` that count for `player_rating` (after the weaker-opponent filter).
+pub fn counted_games(
+    results: &[PeriodResult],
+    player_rating: f64,
+) -> Result<usize, Box<dyn Error>> {
+    let mut n = 0;
+    for r in results {
+        for g in &r.games {
+            let opp: f64 = g.opponent_rating.trim().parse()?;
+            if opponent_counts(player_rating, opp) {
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
+}
 
 pub struct TprWindow {
     pub start_period: String,
@@ -52,7 +96,12 @@ pub fn tpr_report(
     player_rating: f64,
     top30: &Top30ByMonth,
 ) -> Result<TprReport, Box<dyn Error>> {
-    let period_games: Vec<PeriodGameList> = results
+    let counted: Vec<PeriodResult> = results
+        .iter()
+        .map(|r| filter_period_games(r, player_rating))
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+
+    let period_games: Vec<PeriodGameList> = counted
         .iter()
         .map(|r| {
             let games = r
@@ -86,7 +135,7 @@ pub fn tpr_report(
         .max()
         .ok_or("no period sets")?;
 
-    let bonus_sum = year_win_bonus(results, top30)?;
+    let bonus_sum = year_win_bonus(&counted, top30)?;
     let elo_year = elo_year_periods + bonus_sum.round() as i32;
 
     // Longest set by period span; that span is the whole active year
@@ -364,8 +413,9 @@ mod tests {
     fn reported_tpr_comes_from_longest_set_elo_year_is_max() {
         // Strong recent month vs weaker full span: max ELO_YEAR can come from
         // the latest-ending subset, while TPR_ALL/TPR_RAW stay on the longest set.
+        // Opponents stay within MAX_WEAKER_OPPONENT_DIFF of the player (2500).
         let results = vec![
-            period("2025-01-01", 40, 2000.0, 0.0),
+            period("2025-01-01", 40, 2200.0, 0.0),
             period("2025-02-01", 40, 2800.0, 1.0),
         ];
         let report = tpr_report(&results, 2500.0, &empty_top30()).unwrap();
@@ -374,7 +424,7 @@ mod tests {
         assert_eq!(report.windows.len(), 2);
 
         let full = ratings_for_games(
-            &[(2000.0, 0.0); 40]
+            &[(2200.0, 0.0); 40]
                 .into_iter()
                 .chain([(2800.0, 1.0); 40])
                 .collect::<Vec<_>>(),
@@ -395,7 +445,7 @@ mod tests {
     fn short_subset_uses_stuffing_and_penalty_for_elo_year() {
         let n = MIN_GAMES;
         let results = vec![
-            period("2025-01-01", n, 2000.0, 0.0),
+            period("2025-01-01", n, 2200.0, 0.0),
             period("2025-02-01", n, 2700.0, 1.0),
         ];
         let report = tpr_report(&results, 2500.0, &empty_top30()).unwrap();
@@ -419,13 +469,32 @@ mod tests {
                 .any(|w| w.games == n && w.tpr == latest.elo_year)
         );
         // Reported TPR_* still from the longest set.
-        let full_games: Vec<_> = vec![(2000.0, 0.0); n]
+        let full_games: Vec<_> = vec![(2200.0, 0.0); n]
             .into_iter()
             .chain(latest_games)
             .collect();
         let full = ratings_for_games(&full_games, 2500.0);
         assert_eq!(report.all_games_tpr, full.all_games_tpr);
         assert_eq!(report.raw_games_tpr, full.raw_games_tpr);
+    }
+
+    #[test]
+    fn disregards_opponents_more_than_350_weaker() {
+        let results = vec![
+            period("2025-09-01", MIN_GAMES, 2149.0, 1.0), // 351 below 2500 → drop
+            period("2025-10-01", MIN_GAMES, 2150.0, 0.5), // exactly 350 → keep
+        ];
+        let report = tpr_report(&results, 2500.0, &empty_top30()).unwrap();
+        assert_eq!(report.total_games, MIN_GAMES);
+        assert_eq!(report.windows.len(), 1);
+        assert_eq!(report.windows[0].games, MIN_GAMES);
+        assert_eq!(report.windows[0].start_period, "2025-10-01");
+    }
+
+    #[test]
+    fn keeps_opponent_exactly_350_weaker() {
+        assert!(opponent_counts(2500.0, 2150.0));
+        assert!(!opponent_counts(2500.0, 2149.0));
     }
 
     #[test]

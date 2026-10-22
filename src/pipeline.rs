@@ -3,7 +3,9 @@ use crate::cache::player_gms_sum;
 use crate::fide::{PeriodsFetch, periods_for_player};
 use crate::model::{IncompletePlayer, Player, PlayerSummary};
 use crate::rating_list::parse_period;
-use crate::tpr::{MIN_GAMES, summary_from_report, tpr_report};
+use crate::tpr::{
+    MAX_WEAKER_OPPONENT_DIFF, MIN_GAMES, counted_games, summary_from_report, tpr_report,
+};
 use chrono::{Datelike, Months, Utc};
 use std::error::Error;
 
@@ -178,20 +180,21 @@ pub async fn process_players(
                 }
             };
 
-        let total_games: usize = results.iter().map(|r| r.games.len()).sum();
+        let player_rating: f64 = player.rating.parse()?;
+        let total_games = counted_games(&results, player_rating)?;
         if total_games < MIN_GAMES {
             println!(
-                "SKIP\t{}\t{}\tfewer than {} rated games in last {} periods ({})",
+                "SKIP\t{}\t{}\tfewer than {} counted games in last {} periods ({}; >{:.0} weaker ignored)",
                 player.name,
                 player.fide_id,
                 MIN_GAMES,
                 periods.len(),
-                total_games
+                total_games,
+                MAX_WEAKER_OPPONENT_DIFF
             );
             continue;
         }
 
-        let player_rating: f64 = player.rating.parse()?;
         let report = tpr_report(&results, player_rating, top30)?;
         let print_outcome = incomplete.is_empty();
         if print_outcome {
